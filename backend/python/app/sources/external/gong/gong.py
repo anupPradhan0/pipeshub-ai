@@ -95,6 +95,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_calls" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -125,6 +126,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_call" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -168,6 +170,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_calls_extensive" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -257,6 +260,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed add_call" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -291,6 +295,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_call_transcripts" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -326,6 +331,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_manual_crm_associations" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -363,6 +369,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed add_call_recording" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -402,6 +409,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_call_sharing" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -442,6 +450,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_users" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -472,6 +481,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_user" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -502,6 +512,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_user_history" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -546,6 +557,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_users_extensive" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -580,6 +592,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_aggregate_activity" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -618,6 +631,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_aggregate_activity_by_period" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -656,6 +670,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_activity_day_by_day" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -694,6 +709,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_answered_scorecards" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -728,6 +744,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_interaction_stats" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -767,6 +784,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_library_folders" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -805,6 +823,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_library_folder_calls" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -848,6 +867,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_meetings" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -883,6 +903,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_scorecards" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -909,6 +930,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_workspaces" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -944,6 +966,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_trackers" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -979,6 +1002,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_smart_trackers" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1018,6 +1042,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_crm_objects" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1055,6 +1080,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed upload_crm_data" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1092,6 +1118,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed upload_crm_schema" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1126,6 +1153,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed delete_crm_integration" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1167,6 +1195,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed register_crm_integration" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1204,6 +1233,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_request_status" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1243,6 +1273,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed find_people_by_email_or_phone" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1277,6 +1308,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed purge_email_address" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1311,6 +1343,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed purge_phone_number" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1349,6 +1382,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_content_shared_with_external" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1383,6 +1417,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed upload_customer_engagement" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1418,6 +1453,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_flows" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1452,6 +1488,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed upload_digital_interactions" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1478,6 +1515,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_permission_profiles" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1508,6 +1546,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_permission_profile" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1545,6 +1584,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed create_permission_profile" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1586,6 +1626,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed update_permission_profile" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1616,6 +1657,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed delete_permission_profile" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1651,6 +1693,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_company_users" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1685,6 +1728,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_daily_briefs" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1727,6 +1771,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed get_emails_extensive" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )
@@ -1770,6 +1815,7 @@ class GongDataSource:
             response_data = response.json() if response.text() else None
             return GongResponse(
                 success=response.status < HTTP_ERROR_THRESHOLD,
+                status_code=response.status,
                 data=response_data,
                 message="Successfully executed list_forecast_submissions" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {response.status}"
             )

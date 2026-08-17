@@ -838,6 +838,7 @@ class GongDataSourceGenerator:
             "            response_data = response.json() if response.text() else None",
             "            return GongResponse(",
             "                success=response.status < HTTP_ERROR_THRESHOLD,",
+            "                status_code=response.status,",
             "                data=response_data,",
             f'                message="Successfully executed {method_name}" if response.status < HTTP_ERROR_THRESHOLD else f"Failed with status {{response.status}}"',
             "            )",

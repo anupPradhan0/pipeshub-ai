@@ -285,33 +285,85 @@ def test_iso_always_carries_an_offset() -> None:
     assert formatted == "2026-05-01T10:00:00Z"
 
 
+def _wire_datasource(connector: GongConnector, **methods: object) -> list[str]:
+    """Point the connector at a stub data source; returns a call log."""
+    calls: list[str] = []
+    connector.logger = logging.getLogger("gong-test")
+    connector.rate_limiter = AsyncLimiter(1000, 1)
+
+    def _record(name: str, fn: object) -> object:
+        def _wrapped(**kwargs: object) -> object:
+            calls.append(name)
+            return _async(fn(**kwargs) if callable(fn) else fn)
+        return _wrapped
+
+    stub = SimpleNamespace(**{n: _record(n, f) for n, f in methods.items()})
+
+    async def _fresh() -> object:
+        return stub
+
+    connector._get_fresh_datasource = _fresh
+    return calls
+
+
+def _response(success: bool, status: int | None, **extra: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        success=success, status_code=status, data=extra.get("data"),
+        error=extra.get("error"), message=extra.get("message", ""),
+    )
+
+
 def test_a_failed_call_page_raises_instead_of_reporting_an_empty_page() -> None:
     """Returning ([], None) here would let _sync_workspace_calls advance its
     checkpoint past a window it never read, skipping those calls forever."""
     connector = _connector()
-    connector.logger = logging.getLogger("gong-test")
-    connector.rate_limiter = AsyncLimiter(100, 1)
-
-    failing = SimpleNamespace(
-        get_calls_extensive=lambda **_: _async(
-            SimpleNamespace(
-                success=False, data=None, error="429 Too Many Requests", message="failed"
-            )
-        )
+    _wire_datasource(
+        connector,
+        get_calls_extensive=lambda **_: _response(
+            False, 403, error="Forbidden", message="failed"
+        ),
     )
 
-    async def _fresh() -> object:
-        return failing
-
-    connector._get_fresh_datasource = _fresh
-
-    with pytest.raises(RuntimeError, match="429 Too Many Requests"):
+    with pytest.raises(RuntimeError, match="Forbidden"):
         asyncio.run(connector._list_calls_page(
             workspace_id="ws-1",
             from_dt=datetime(2026, 5, 1, tzinfo=timezone.utc),
             to_dt=datetime(2026, 5, 2, tzinfo=timezone.utc),
             cursor=None,
         ))
+
+
+def test_throttled_requests_are_retried_then_succeed() -> None:
+    """GongDataSource folds a 429 into a plain failed response. Without the
+    _call_api bridge, call_with_retry never sees the status and Gong's 3 req/s
+    ceiling turns into silently dropped pages."""
+    connector = _connector()
+    attempts: list[int] = []
+
+    def _flaky(**_: object) -> SimpleNamespace:
+        attempts.append(1)
+        if len(attempts) < 3:
+            return _response(False, 429, error="Too Many Requests")
+        return _response(True, 200, data={"users": [], "records": {}})
+
+    _wire_datasource(connector, list_users=_flaky)
+
+    result = asyncio.run(connector._call("list_users"))
+
+    assert len(attempts) == 3, "429 responses must be retried, not surfaced as failure"
+    assert result.success
+
+
+def test_permanent_failures_are_not_retried() -> None:
+    connector = _connector()
+    calls = _wire_datasource(
+        connector, list_users=lambda **_: _response(False, 403, error="Forbidden")
+    )
+
+    result = asyncio.run(connector._call("list_users"))
+
+    assert calls == ["list_users"], "a 403 must not burn the daily API quota on retries"
+    assert not result.success
 
 
 async def _async(value: object) -> object:

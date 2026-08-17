@@ -6,10 +6,12 @@ sync phase to one API call per page of calls.
 """
 
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from logging import Logger
 from typing import Any, Optional
 from uuid import uuid4
 
+import httpx  # type: ignore
 from aiolimiter import AsyncLimiter  # pyright: ignore[reportMissingImports]
 from fastapi.responses import StreamingResponse  # pyright: ignore[reportMissingImports]
 from pydantic import BaseModel, Field  # pyright: ignore[reportMissingImports]
@@ -80,7 +82,8 @@ from app.services.notification.types import (
     NotificationSeverity,
     NotificationType,
 )
-from app.sources.client.gong.gong import GongClient
+from app.sources.client.gong.gong import GongClient, GongResponse
+from app.sources.client.http.http_retry import call_with_retry
 from app.sources.external.gong.gong import GongDataSource
 from app.utils.time_conversion import get_epoch_timestamp_in_ms, parse_timestamp
 
@@ -100,10 +103,14 @@ GONG_DEFAULT_HISTORY_DAYS = 365
 GONG_SYNC_OVERLAP_HOURS = 24
 
 # Gong's documented ceiling is 3 requests/second per company, with a separate
-# daily call quota. Every outbound request goes through this limiter.
-# ponytail: fixed rate, no adaptive backoff — the shared HTTPClient has no 429
-# handling, so if daily-quota exhaustion becomes real, add Retry-After parsing there.
+# daily call quota. Every outbound request goes through this limiter, and through
+# call_with_retry on top of it for the 429s the limiter cannot prevent.
 GONG_REQUESTS_PER_SECOND = 3
+
+# Statuses worth another attempt. Mirrors http_retry's own set; needed here
+# because GongDataSource folds HTTP errors into GongResponse instead of raising,
+# so call_with_retry never sees the status unless we re-raise it.
+GONG_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 # Pseudo-workspace used when /settings/workspaces is unavailable (the
 # api:settings:read scope is optional). Calls still sync, ungrouped by workspace.
@@ -492,6 +499,41 @@ class GongConnector(BaseConnector):
 
         return self.data_source
 
+    async def _call_api(self, method_name: str, **kwargs: object) -> GongResponse:
+        """One rate-limited attempt, re-raising retryable statuses.
+
+        GongDataSource folds HTTP errors into a GongResponse instead of raising, so
+        without this bridge call_with_retry never sees a 429 and would treat throttling
+        as a permanent failure. The data source is resolved per attempt so a retry that
+        waits out a long Retry-After picks up a token rotated in the meantime.
+        """
+        datasource = await self._get_fresh_datasource()
+        async with self.rate_limiter:
+            response: GongResponse = await getattr(datasource, method_name)(**kwargs)
+
+        status = response.status_code
+        if not response.success and status in GONG_RETRYABLE_STATUS_CODES:
+            request = httpx.Request("GET", f"gong/{method_name}")
+            raise httpx.HTTPStatusError(
+                f"Gong HTTP {status}: {response.error or response.message}",
+                request=request,
+                response=httpx.Response(status, request=request),
+            )
+        return response
+
+    async def _call(self, method_name: str, **kwargs: object) -> GongResponse:
+        """Rate-limited Gong request with backoff on 429/5xx.
+
+        The limiter keeps us under the documented 3 req/s; this handles the throttling
+        it cannot prevent, since Gong also enforces a daily quota shared with any other
+        integration on the same account.
+        """
+        return await call_with_retry(
+            partial(self._call_api, method_name, **kwargs),
+            logger=self.logger,
+            label=f"gong/{method_name}",
+        )
+
     # ========================================================================
     # Core sync
     # ========================================================================
@@ -683,9 +725,7 @@ class GongConnector(BaseConnector):
         users: list[GongUser] = []
         cursor: Optional[str] = None
         while True:
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.list_users(cursor=cursor)
+            resp = await self._call("list_users", cursor=cursor)
             if not resp.success or not isinstance(resp.data, dict):
                 self.logger.warning("Gong: list_users failed — %s", resp.message)
                 break
@@ -709,9 +749,7 @@ class GongConnector(BaseConnector):
             )
         ]
         try:
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.list_workspaces()
+            resp = await self._call("list_workspaces")
         except Exception as exc:
             self.logger.warning("Gong: list_workspaces errored (%s); syncing ungrouped.", exc)
             return default
@@ -756,16 +794,15 @@ class GongConnector(BaseConnector):
         if workspace_id:
             call_filter["workspaceId"] = workspace_id
 
-        datasource = await self._get_fresh_datasource()
-        async with self.rate_limiter:
-            resp = await datasource.get_calls_extensive(
-                content_selector={
-                    "context": "Extended",
-                    "exposedFields": {"parties": True},
-                },
-                filter=call_filter,
-                cursor=cursor,
-            )
+        resp = await self._call(
+            "get_calls_extensive",
+            content_selector={
+                "context": "Extended",
+                "exposedFields": {"parties": True},
+            },
+            filter=call_filter,
+            cursor=cursor,
+        )
 
         if not resp.success or not isinstance(resp.data, dict):
             # Raise rather than return empty: _sync_workspace_calls must not
@@ -785,11 +822,9 @@ class GongConnector(BaseConnector):
     ) -> list[GongTranscriptMonologue]:
         """POST /v2/calls/transcript for a single call."""
         try:
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.get_call_transcripts(
-                    filter={"callIds": [call_id]}
-                )
+            resp = await self._call(
+                "get_call_transcripts", filter={"callIds": [call_id]}
+            )
         except Exception as exc:
             self.logger.warning("Gong: transcript fetch errored for %s: %s", call_id, exc)
             return []
@@ -811,15 +846,14 @@ class GongConnector(BaseConnector):
     async def _fetch_call_detail(self, call_id: str) -> Optional[GongCall]:
         """Re-read one call so ``stream_record`` has current parties and CRM context."""
         try:
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.get_calls_extensive(
-                    content_selector={
-                        "context": "Extended",
-                        "exposedFields": {"parties": True},
-                    },
-                    filter={"callIds": [call_id]},
-                )
+            resp = await self._call(
+                "get_calls_extensive",
+                content_selector={
+                    "context": "Extended",
+                    "exposedFields": {"parties": True},
+                },
+                filter={"callIds": [call_id]},
+            )
         except Exception as exc:
             self.logger.warning("Gong: call detail errored for %s: %s", call_id, exc)
             return None
@@ -1145,9 +1179,7 @@ class GongConnector(BaseConnector):
         try:
             if not self.data_source and not await self.init():
                 return False
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.list_users()
+            resp = await self._call("list_users")
             if resp.success:
                 self.logger.info("✅ Gong connection test successful")
                 return True
@@ -1218,9 +1250,7 @@ class GongConnector(BaseConnector):
                     has_more=False, message="Gong connector is not initialized",
                 )
 
-            datasource = await self._get_fresh_datasource()
-            async with self.rate_limiter:
-                resp = await datasource.list_workspaces()
+            resp = await self._call("list_workspaces")
             if not resp.success or not isinstance(resp.data, dict):
                 return FilterOptionsResponse(
                     success=False, options=[], page=page, limit=limit,

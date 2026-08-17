@@ -48,6 +48,11 @@ class GongResponse(BaseModel):
     """
 
     success: bool = Field(..., description="Whether the request was successful")
+    # Needed to tell a retryable failure (429/5xx) from a permanent one: the data
+    # source folds HTTP errors into this model instead of raising.
+    status_code: int | None = Field(
+        default=None, description="HTTP status code of the response"
+    )
     data: dict[str, object] | list[object] | bytes | None = Field(
         default=None, description="Response data (JSON) or file content (bytes)"
     )
