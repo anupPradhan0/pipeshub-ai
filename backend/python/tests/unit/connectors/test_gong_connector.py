@@ -24,6 +24,7 @@ from app.connectors.sources.gong.connector import (
     GongParty,
     GongTranscriptMonologue,
     GongTranscriptSentence,
+    GongWorkspace,
 )
 from app.models.permission import EntityType, PermissionType
 
@@ -119,10 +120,12 @@ def test_revision_id_tracks_late_arriving_parties_and_crm_links() -> None:
     not move the revision id, _process_record treats the call as unchanged and
     the new context is never indexed."""
     connector = _connector()
-    bare = connector._build_call_record(_call(), "group-1")
+    bare = connector._build_call_record(_call(), "group-1", "ws-1")
 
     with_party = connector._build_call_record(
-        _call(parties=[GongParty(id="p1", emailAddress="rep@acme.com")]), "group-1"
+        _call(parties=[GongParty(id="p1", emailAddress="rep@acme.com")]),
+        "group-1",
+        "ws-1",
     )
     with_crm = connector._build_call_record(
         _call(context=[GongCrmContext(
@@ -130,6 +133,7 @@ def test_revision_id_tracks_late_arriving_parties_and_crm_links() -> None:
             objects=[GongCrmObject(objectType="Opportunity", objectId="006")],
         )]),
         "group-1",
+        "ws-1",
     )
 
     assert bare.external_revision_id != with_party.external_revision_id
@@ -137,7 +141,7 @@ def test_revision_id_tracks_late_arriving_parties_and_crm_links() -> None:
 
 
 def test_call_record_maps_core_fields() -> None:
-    record = _connector()._build_call_record(_call(), "group-1")
+    record = _connector()._build_call_record(_call(), "group-1", "ws-1")
 
     assert record.external_record_id == "call-1"
     assert record.record_name == "Acme discovery call"
@@ -148,11 +152,52 @@ def test_call_record_maps_core_fields() -> None:
     assert record.indexing_status != ProgressStatus.AUTO_INDEX_OFF.value
 
 
+def test_record_group_external_id_matches_the_group_not_the_raw_workspace_id() -> None:
+    """DataSourceEntitiesProcessor._handle_record_group resolves a record's group
+    by external_record_group_id alone, ignoring record_group_id. If it does not
+    match the RecordGroup's external_group_id, the processor silently creates a
+    duplicate group named after the raw id — or, when the field is empty, skips
+    the BELONGS_TO edge entirely and leaves record_group_id dangling."""
+    connector = _connector()
+
+    named = GongWorkspace(id="ws-1", name="EMEA")
+    assert connector._workspace_external_id(named) == "ws-1"
+
+    # Fallback workspace: id is blank, so the group and its records must agree on
+    # the stand-in rather than falling back to metaData.workspaceId.
+    fallback = GongWorkspace(id="", name="Gong")
+    external_id = connector._workspace_external_id(fallback)
+    assert external_id == "gong"
+
+    group, _ = connector._build_record_group(fallback)
+    record = connector._build_call_record(_call(), group.id, external_id)
+
+    assert group.external_group_id == external_id
+    assert record.external_record_group_id == group.external_group_id
+    assert record.external_record_group_id != _call().metaData.workspaceId
+
+
+def test_checkpoint_without_an_offset_does_not_crash_the_window_comparison() -> None:
+    """A naive isoformat value parses fine, then explodes on comparison with the
+    timezone-aware window end."""
+    connector = _connector()
+    connector.logger = logging.getLogger("gong-test")
+    connector.sync_point = SimpleNamespace(
+        read_sync_point=lambda _key: _async({"last_sync_at": "2026-05-01T10:00:00"})
+    )
+    connector.sync_filters = FilterCollection()
+
+    start = asyncio.run(connector._resolve_sync_start("ws-1"))
+
+    assert start.tzinfo is not None
+    assert start < datetime.now(tz=timezone.utc)
+
+
 def test_disabling_the_calls_filter_marks_records_auto_index_off() -> None:
     filters = FilterCollection.from_dict(
         {"calls": {"value": False, "operator": "is", "type": "boolean"}}
     )
-    record = _connector(indexing_filters=filters)._build_call_record(_call(), "group-1")
+    record = _connector(indexing_filters=filters)._build_call_record(_call(), "group-1", "ws-1")
 
     assert record.indexing_status == ProgressStatus.AUTO_INDEX_OFF.value
 

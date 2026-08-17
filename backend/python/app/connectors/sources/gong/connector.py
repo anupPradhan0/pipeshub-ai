@@ -105,9 +105,6 @@ GONG_SYNC_OVERLAP_HOURS = 24
 # handling, so if daily-quota exhaustion becomes real, add Retry-After parsing there.
 GONG_REQUESTS_PER_SECOND = 3
 
-# Calls per page requested from /calls/extensive.
-GONG_PAGE_SIZE = 100
-
 # Pseudo-workspace used when /settings/workspaces is unavailable (the
 # api:settings:read scope is optional). Calls still sync, ungrouped by workspace.
 GONG_DEFAULT_WORKSPACE_ID = ""
@@ -556,7 +553,9 @@ class GongConnector(BaseConnector):
     async def _sync_workspace_calls(self, workspace: GongWorkspace) -> None:
         """Page through a workspace's calls and persist each page as it arrives."""
         group, group_perms = self._build_record_group(workspace)
+        # on_new_record_groups reassigns group.id to the persisted group's id.
         await self.data_entities_processor.on_new_record_groups([(group, group_perms)])
+        external_group_id = self._workspace_external_id(workspace)
 
         from_dt = await self._resolve_sync_start(workspace.id)
         to_dt = datetime.now(tz=timezone.utc)
@@ -584,7 +583,7 @@ class GongConnector(BaseConnector):
             if calls:
                 batch = [
                     (
-                        self._build_call_record(call, group.id),
+                        self._build_call_record(call, group.id, external_group_id),
                         self._build_call_permissions(call),
                     )
                     for call in calls
@@ -632,9 +631,12 @@ class GongConnector(BaseConnector):
         raw = data.get("last_sync_at")
         if raw:
             try:
-                return datetime.fromisoformat(str(raw)) - timedelta(
-                    hours=GONG_SYNC_OVERLAP_HOURS
-                )
+                checkpoint = datetime.fromisoformat(str(raw))
+                # A checkpoint without an offset would compare against the aware
+                # window end and raise TypeError instead of just resyncing.
+                if checkpoint.tzinfo is None:
+                    checkpoint = checkpoint.replace(tzinfo=timezone.utc)
+                return checkpoint - timedelta(hours=GONG_SYNC_OVERLAP_HOURS)
             except ValueError:
                 self.logger.warning(
                     "Gong: unreadable checkpoint %r for workspace %s; refetching window.",
@@ -870,6 +872,15 @@ class GongConnector(BaseConnector):
             )
         return app_users
 
+    @staticmethod
+    def _workspace_external_id(workspace: GongWorkspace) -> str:
+        """External id shared by the workspace's RecordGroup and its records.
+
+        A blank workspace id (the no-settings-scope fallback) would collide with
+        any other blank-id group on this connector, so it gets a stable stand-in.
+        """
+        return workspace.id or GONG_DEFAULT_WORKSPACE_NAME.lower()
+
     def _build_record_group(
         self, workspace: GongWorkspace
     ) -> tuple[RecordGroup, list[Permission]]:
@@ -879,9 +890,7 @@ class GongConnector(BaseConnector):
             org_id=self.data_entities_processor.org_id,
             name=workspace.name or GONG_DEFAULT_WORKSPACE_NAME,
             description=workspace.description,
-            # A blank workspace id would collide with any other blank-id group on
-            # this connector; the constant keeps the fallback group addressable.
-            external_group_id=workspace.id or GONG_DEFAULT_WORKSPACE_NAME.lower(),
+            external_group_id=self._workspace_external_id(workspace),
             connector_name=Connectors.GONG,
             connector_id=self.connector_id,
             group_type=RecordGroupType.GONG_WORKSPACE,
@@ -906,17 +915,18 @@ class GongConnector(BaseConnector):
         return ""
 
     def _build_call_record(
-        self, call: GongCall, record_group_id: str
+        self, call: GongCall, record_group_id: str, external_group_id: str
     ) -> MeetingRecord:
         meta = call.metaData
         started_ms = self._to_epoch_ms(meta.started) or self._to_epoch_ms(meta.scheduled)
 
+        start_time: Optional[str] = None
         end_time: Optional[str] = None
-        if started_ms and meta.duration:
-            end_time = self._iso(
-                datetime.fromtimestamp(started_ms / 1000, tz=timezone.utc)
-                + timedelta(seconds=meta.duration)
-            )
+        if started_ms:
+            started_dt = datetime.fromtimestamp(started_ms / 1000, tz=timezone.utc)
+            start_time = self._iso(started_dt)
+            if meta.duration:
+                end_time = self._iso(started_dt + timedelta(seconds=meta.duration))
 
         duration_minutes = (
             round(meta.duration / 60) if meta.duration is not None else None
@@ -942,7 +952,11 @@ class GongConnector(BaseConnector):
             record_group_type=RecordGroupType.GONG_WORKSPACE,
             external_record_id=meta.id,
             external_revision_id=revision_id,
-            external_record_group_id=meta.workspaceId or None,
+            # Must equal the RecordGroup's external_group_id, not the raw
+            # metaData.workspaceId: _handle_record_group resolves the group by
+            # this field alone and silently creates a duplicate (or skips the
+            # BELONGS_TO edge entirely) when it does not match.
+            external_record_group_id=external_group_id,
             record_group_id=record_group_id,
             version=1,
             origin=OriginTypes.CONNECTOR,
@@ -958,7 +972,7 @@ class GongConnector(BaseConnector):
             host_email=self._primary_user_email(call) or None,
             host_id=meta.primaryUserId or None,
             duration_minutes=duration_minutes,
-            start_time=meta.started,
+            start_time=start_time,
             end_time=end_time,
             recording_url=meta.url or None,
             preview_renderable=False,
@@ -1255,7 +1269,6 @@ class GongConnector(BaseConnector):
         connector_id: str,
         scope: str,
         created_by: str,
-        **kwargs: object,
     ) -> "GongConnector":
         data_entities_processor = DataSourceEntitiesProcessor(
             logger, data_store_provider, config_service
