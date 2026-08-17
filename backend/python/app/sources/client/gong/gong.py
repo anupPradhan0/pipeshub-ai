@@ -216,6 +216,10 @@ class GongAuthConfig(BaseModel):
     clientSecret: str | None = None
     redirectUri: str | None = None
     oauthConfigId: str | None = None
+    # Gong's token response carries `api_base_url_for_customer`, but OAuthToken
+    # drops fields outside its fixed schema, so the per-customer host is collected
+    # as a user-entered auth field instead (same shape as Salesforce instanceUrl).
+    baseUrl: str | None = None
 
     class Config:
         extra = "allow"
@@ -244,6 +248,10 @@ class GongConnectorConfig(BaseModel):
 
     class Config:
         extra = "allow"
+
+    def resolve_base_url(self) -> str:
+        """Per-customer host entered on the auth form wins over the global default."""
+        return self.auth.baseUrl or self.base_url
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +381,7 @@ class GongClient(IClient):
                     access_token=access_token,
                     client_id=client_id,
                     client_secret=client_secret,
-                    base_url=connector_config.base_url,
+                    base_url=connector_config.resolve_base_url(),
                 )
                 return cls(oauth_cfg.create_client())
 
@@ -399,7 +407,7 @@ class GongClient(IClient):
                 basic_cfg = GongBasicAuthConfig(
                     access_key=access_key,
                     access_key_secret=access_key_secret,
-                    base_url=connector_config.base_url,
+                    base_url=connector_config.resolve_base_url(),
                 )
                 return cls(basic_cfg.create_client())
 
@@ -435,7 +443,9 @@ class GongClient(IClient):
                 dict[str, Any], toolset_config.get("auth", {}) or {}
             )
             base_url: str = str(
-                toolset_config.get("base_url", "https://api.gong.io/v2")
+                auth_config.get("baseUrl")
+                or toolset_config.get("base_url")
+                or "https://api.gong.io/v2"
             )
             auth_type = auth_config.get("authType", "BASIC_AUTH")
 

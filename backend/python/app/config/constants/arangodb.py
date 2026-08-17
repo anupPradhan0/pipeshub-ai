@@ -72,6 +72,7 @@ class Connectors(Enum):
     LINEAR = "LINEAR"
     ZAMMAD = "ZAMMAD"
     ZOOM = "ZOOM"
+    GONG = "GONG"
 
     GITLAB = "GITLAB"
     GITLAB_PERSONAL = "GITLAB PERSONAL"
@@ -111,6 +112,7 @@ class AppGroups(Enum):
     SLACK = "Slack"
     ZAMMAD = "Zammad"
     ZOOM = "Zoom"
+    GONG = "Gong"
     LOCAL_STORAGE = "Local Storage"
     RSS = "RSS"
     GITLAB = "GitLab"

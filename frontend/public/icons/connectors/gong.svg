@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256px" height="256px" viewBox="0 0 256 256" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <title>Gong</title>
+    <g fill="none" fill-rule="evenodd">
+        <circle fill="#7C3AED" cx="128" cy="128" r="128"/>
+        <path d="M128,54 C168.869,54 202,87.131 202,128 C202,168.869 168.869,202 128,202 C87.131,202 54,168.869 54,128"
+              stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+        <path d="M128,92 C147.882,92 164,108.118 164,128 C164,147.882 147.882,164 128,164 C108.118,164 92,147.882 92,128"
+              stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" opacity="0.72"/>
+        <circle fill="#FFFFFF" cx="128" cy="128" r="14"/>
+    </g>
+</svg>

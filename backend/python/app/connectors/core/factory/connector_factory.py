@@ -55,6 +55,7 @@ from app.connectors.sources.google.gmail.individual.connector import (
     GoogleGmailIndividualConnector,
 )
 from app.connectors.sources.google.gmail.team.connector import GoogleGmailTeamConnector
+from app.connectors.sources.gong.connector import GongConnector
 from app.connectors.sources.google_cloud_storage.connector import GCSConnector
 from app.connectors.sources.linear.connector import LinearConnector
 from app.connectors.sources.localKB.connector import KnowledgeBaseConnector
@@ -128,6 +129,7 @@ class ConnectorFactory:
         "notion": NotionConnector,
         "zammad": ZammadConnector,
         "zoom": ZoomConnector,
+        "gong": GongConnector,
         "salesforce": SalesforceConnector,
         "gitlab": GitLabConnector,
         "gitlabpersonal": GitLabPersonalConnector,

@@ -83,6 +83,7 @@ class RecordGroupType(str, Enum):
     SQL_DATABASE = "SQL_DATABASE"
     SQL_NAMESPACE = "SQL_NAMESPACE"
     STAGE = "STAGE"
+    GONG_WORKSPACE = "GONG_WORKSPACE"
 
 class RecordType(str, Enum):
     FILE = "FILE"
