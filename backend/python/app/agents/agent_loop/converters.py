@@ -148,6 +148,20 @@ def convert_message_from_langchain(message: BaseMessage) -> Message:
 
     if isinstance(message, LCToolMessage):
         content = message.content
+        if isinstance(content, list):
+            parts: list[Part] = []
+            for block in content:
+                if isinstance(block, dict):
+                    part = _langchain_block_to_part(block)
+                    if part is not None:
+                        parts.append(part)
+                elif isinstance(block, str) and block:
+                    parts.append(TextPart(text=block))
+            return ToolMessage(
+                content=parts or "",
+                tool_call_id=message.tool_call_id,
+                is_error=getattr(message, "status", None) == "error",
+            )
         return ToolMessage(
             content=content if isinstance(content, str) else str(content),
             tool_call_id=message.tool_call_id,
@@ -161,8 +175,21 @@ def convert_messages_from_langchain(messages: list[BaseMessage]) -> list[Message
     return [convert_message_from_langchain(m) for m in messages]
 
 
-def convert_message_to_langchain(message: Message) -> BaseMessage:
-    """Convert one agent-loop `Message` to its LangChain equivalent."""
+def convert_message_to_langchain(
+    message: Message, *, strip_tool_images: bool = False,
+) -> BaseMessage:
+    """Convert one agent-loop `Message` to its LangChain equivalent.
+
+    `strip_tool_images`: True for chat models whose provider does not
+    accept image content in a tool-result message (Ollama's `/api/chat` —
+    see `LangChainTransport._supports_multipart_tool_result`). Every other
+    LangChain-wrapped provider (OpenAI, Anthropic, Gemini, Bedrock, ...)
+    accepts multipart tool results and keeps images inline here; the
+    stripped images are recovered from `context.tool_state
+    ["pending_tool_images"]` and re-injected into a `UserMessage` by the
+    `shape_retrieved_image_injection` PRE_MODEL fallback hook
+    (`attachment_resolver.py`).
+    """
     if message.role == MessageRole.SYSTEM:
         return LCSystemMessage(content=message.content)
 
@@ -183,7 +210,24 @@ def convert_message_to_langchain(message: Message) -> BaseMessage:
         return AIMessage(content=message.text, tool_calls=tool_calls)
 
     if message.role == MessageRole.TOOL:
-        serialized_content = message.content + message.step_footer
+        content = message.content
+        if isinstance(content, list):
+            if strip_tool_images:
+                serialized_content = message.text + message.step_footer
+                return LCToolMessage(
+                    content=serialized_content,
+                    tool_call_id=_clamp_tool_call_id(message.tool_call_id or ""),
+                    status="error" if message.is_error else "success",
+                )
+            blocks = [_part_to_block(p) for p in content]
+            if message.step_footer:
+                blocks.append({"type": "text", "text": message.step_footer})
+            return LCToolMessage(
+                content=blocks,
+                tool_call_id=_clamp_tool_call_id(message.tool_call_id or ""),
+                status="error" if message.is_error else "success",
+            )
+        serialized_content = content + message.step_footer
         return LCToolMessage(
             content=serialized_content,
             tool_call_id=_clamp_tool_call_id(message.tool_call_id or ""),
@@ -194,12 +238,14 @@ def convert_message_to_langchain(message: Message) -> BaseMessage:
 
 
 def convert_messages_to_langchain(
-    messages: list[Message], system: str | None = None
+    messages: list[Message], system: str | None = None, *, strip_tool_images: bool = False,
 ) -> list[BaseMessage]:
     """Convert a full agent-loop message list, prepending `system` as a
     LangChain `SystemMessage` when provided (mirrors `LLMTransport.complete`'s
     contract: `system` arrives as a separate kwarg, not inside `messages`)."""
-    converted = [convert_message_to_langchain(m) for m in messages]
+    converted = [
+        convert_message_to_langchain(m, strip_tool_images=strip_tool_images) for m in messages
+    ]
     if system:
         return [LCSystemMessage(content=system), *converted]
     return converted
@@ -464,14 +510,61 @@ async def _unbound_tool_coroutine(**_kwargs: Any) -> Any:  # noqa: ANN401
     )
 
 
+_TOOL_MODEL_CACHE: dict[str, StructuredTool] = {}
+_TOOL_MODEL_CACHE_MAXSIZE = 512
+
+
+def _tool_schema_key(schema: ToolSchema) -> str:
+    """Content key for a tool schema.
+
+    `ToolSchema` is frozen but holds a dict, so it is unhashable, and
+    `ToolRegistry.schemas()` rebuilds these objects every turn — identity would
+    never match. Sorted-key JSON makes two equal schemas collide on purpose and
+    two different ones never.
+    """
+    payload = json.dumps(
+        [schema.name, schema.description, schema.input_schema],
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def convert_tool_schema_to_langchain(schema: ToolSchema) -> StructuredTool:
+    """Build the LangChain tool object for `schema`, reusing a cached one.
+
+    `create_model()` runs pydantic's full schema generation, and this ran once
+    per tool per LLM call — measured at 8.8% of query-service CPU, rebuilding
+    identical classes (26 tools on 1,820 of 1,842 binds over six hours). The
+    transport's own cache does not cover it: the transport is constructed per
+    request, so it starts empty on every chat.
+
+    Caching the class also lets pydantic's internal schema cache serve the
+    `model_json_schema()` that `convert_to_openai_tool` calls on every send.
+
+    Safe to share: the object carries only a schema — `_unbound_tool_coroutine`
+    raises if anything tries to execute it — and `bind_tools` reads the tools to
+    build a separate list of dicts rather than mutating them.
+    """
+    key = _tool_schema_key(schema)
+    cached = _TOOL_MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     args_model = _json_schema_to_pydantic_model(f"{schema.name}_Args", schema.input_schema)
-    return StructuredTool.from_function(
+    tool = StructuredTool.from_function(
         name=schema.name,
         description=schema.description,
         args_schema=args_model,
         coroutine=_unbound_tool_coroutine,
     )
+    # Cleared wholesale rather than evicted one at a time: the tool set is
+    # bounded by the registry, so this only fires if schemas are being generated
+    # dynamically, and a rebuild costs the same as the miss it replaces.
+    if len(_TOOL_MODEL_CACHE) >= _TOOL_MODEL_CACHE_MAXSIZE:
+        _TOOL_MODEL_CACHE.clear()
+    _TOOL_MODEL_CACHE[key] = tool
+    return tool
 
 
 def convert_tool_schemas_to_langchain(

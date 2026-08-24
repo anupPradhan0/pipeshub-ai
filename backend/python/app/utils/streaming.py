@@ -238,6 +238,40 @@ async def stream_content(signed_url: str, record_id: str | None = None, file_nam
         )
 
 
+async def stream_with_eager_first_chunk(
+    source: AsyncGenerator[bytes, None],
+) -> AsyncGenerator[bytes, None]:
+    """Return a streaming generator after eagerly pulling its first chunk.
+
+    Reading the first chunk before returning lets upstream auth / 404 / network
+    errors surface here, where they can still be converted to a clean HTTP 5xx,
+    rather than after ``StreamingResponse`` has already committed the status line
+    and can only produce a truncated chunked body.
+    """
+    aiter = source.__aiter__()
+    try:
+        first = await aiter.__anext__()
+    except StopAsyncIteration:
+        await source.aclose()
+        async def _empty() -> AsyncGenerator[bytes, None]:
+            return
+            yield b""  # noqa: unreachable — marks function as async generator
+        return _empty()
+    except Exception:
+        await source.aclose()
+        raise
+
+    async def _gen() -> AsyncGenerator[bytes, None]:
+        try:
+            yield first
+            async for chunk in aiter:
+                yield chunk
+        finally:
+            await source.aclose()
+
+    return _gen()
+
+
 def create_stream_record_response(
     content_stream: AsyncGenerator[bytes, None],
     filename: str | None,
@@ -1017,6 +1051,37 @@ def cleanup_content(response_text: str) -> str:
     return response_text.strip()
 
 
+def _recover_structured_json_from_exception(
+    error: Exception,
+    schema: type[SchemaT],
+) -> SchemaT | None:
+    """Recover JSON with duplicated wrapper braces from a validation error."""
+    if not isinstance(error, ValidationError):
+        return None
+
+    for detail in error.errors():
+        raw_input = detail.get("input")
+        if not isinstance(raw_input, str):
+            continue
+
+        original = raw_input.strip()
+        cleaned = cleanup_content(original)
+        candidates = [original, cleaned]
+        for candidate in (original, cleaned):
+            if candidate.startswith("{{"):
+                candidates.append(candidate[1:])
+                if candidate.endswith("}}"):
+                    candidates.append(candidate[1:-1])
+
+        for candidate in dict.fromkeys(candidates):
+            try:
+                return schema.model_validate_json(candidate)
+            except ValidationError:
+                pass
+
+    return None
+
+
 async def invoke_with_structured_output_and_reflection(
     llm: BaseChatModel,
     messages: list,
@@ -1040,6 +1105,10 @@ async def invoke_with_structured_output_and_reflection(
     try:
         response = await _ainvoke_throttled(llm_with_structured_output, messages)
     except Exception as e:
+        recovered = _recover_structured_json_from_exception(e, schema)
+        if recovered is not None:
+            logger.info("Recovered schema-valid structured output from invocation error")
+            return recovered
         logger.error(f"LLM invocation failed: {e}")
         return None
 
@@ -1135,6 +1204,12 @@ Respond only with valid JSON that matches the schema."""
                 return parsed_response
 
             except Exception as reflection_error:
+                recovered = _recover_structured_json_from_exception(reflection_error, schema)
+                if recovered is not None:
+                    logger.info(
+                        "Recovered schema-valid structured output from reflection invocation error"
+                    )
+                    return recovered
                 logger.warning(f"Reflection attempt {attempt + 1} failed: {reflection_error}")
                 if attempt < max_retries - 1:
                     # Update messages for next retry

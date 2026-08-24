@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional,Dict, List, Literal, TypeVar
 from uuid import uuid4
-from jinja2 import Template
 from app.modules.qna.prompt_templates import (
     agent_block_group_prompt,
 )
@@ -24,6 +23,7 @@ from app.models.blocks import (
     BlocksContainer,
     SemanticMetadata,
 )
+from app.utils.jinja_templates import compiled_template
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 # Type variable for enum classes (must be after Enum import)
@@ -34,14 +34,17 @@ def resolve_weburl(weburl: str | None, frontend_url: str | None) -> str | None:
     """Normalize a record's weburl into an absolute URL.
 
     Relative paths are prefixed with *frontend_url*; already-absolute URLs
-    pass through unchanged.  Returns ``None`` when *weburl* is falsy.
+    pass through unchanged.  Returns ``None`` when *weburl* is falsy, or when
+    a relative path cannot be resolved — a guessed host would produce a link
+    that does not work in the deployment.
     """
     if not weburl:
         return None
     if weburl.startswith("http"):
         return weburl
-    base = frontend_url or "http://localhost:3000"
-    return f"{base.rstrip('/')}/{weburl.lstrip('/')}"
+    if not frontend_url:
+        return None
+    return f"{frontend_url.rstrip('/')}/{weburl.lstrip('/')}"
 
 
 class LlmTextContent(BaseModel):
@@ -461,7 +464,12 @@ class FileRecord(Record):
         """
 
         try:
-            from app.utils.chat_helpers import valid_group_labels, build_group_blocks
+            from app.utils.chat_helpers import (
+                _safe_stringify_content,
+                build_group_blocks,
+                format_code_locator,
+                valid_group_labels,
+            )
 
             content: list[LlmTextContent] = []
             context_metadata = f"record/{self.id}"
@@ -491,6 +499,19 @@ class FileRecord(Record):
                     content.append(LlmTextContent(
                         type="text",
                         text=f"* Block Type: {block_type}\n* Block Content: {data}\n\n",
+                    ))
+                elif block_type == BlockType.CODE.value and block.parent_index is None:
+                    # Top-level code belongs to no group, so without this branch a
+                    # file with no classes renders as an empty record.
+                    qname = block.code_metadata.qualified_name if block.code_metadata else None
+                    locator = format_code_locator(getattr(self, "file_path", "") or "", qname or "")
+                    header = f"* Symbol: {locator}\n" if locator else ""
+                    content.append(LlmTextContent(
+                        type="text",
+                        text=(
+                            f"* Block Type: {block_type}\n{header}"
+                            f"* Block Content: {_safe_stringify_content(data)}\n\n"
+                        ),
                     ))
                 elif block_type == BlockType.TABLE_ROW.value:
                     block_group_index = block.parent_index
@@ -526,7 +547,7 @@ class FileRecord(Record):
                                     })
 
                             if child_results:
-                                template = Template(agent_block_group_prompt)
+                                template = compiled_template(agent_block_group_prompt)
                                 rendered_form = template.render(
                                     block_group_index=block_group_index,
                                     label=GroupType.TABLE.value,
@@ -541,7 +562,7 @@ class FileRecord(Record):
                     block_group_id = f"{self.virtual_record_id or ''}-{parent_index}"
                     if block_group_id in seen_block_groups:
                         continue
-                    template = Template(agent_block_group_prompt)
+                    template = compiled_template(agent_block_group_prompt)
                     if parent_index >= len(block_groups):
                         continue
                     block_group = block_groups[parent_index]
@@ -559,6 +580,7 @@ class FileRecord(Record):
                         block_group_index=parent_index,
                         label=block_group_type,
                         blocks=group_blocks,
+                        file_path=getattr(self, "file_path", "") or "",
                     )
                     content.append(LlmTextContent(
                         type="text",
@@ -1331,6 +1353,7 @@ class TicketRecord(Record):
             preview_renderable=record_doc.get("previewRenderable", True),
             is_dependent_node=record_doc.get("isDependentNode", False),
             parent_node_id=record_doc.get("parentNodeId"),
+            is_placeholder=record_doc.get("isPlaceholder", False),
             status=TicketRecord._safe_enum_parse(ticket_doc.get("status"), Status),
             priority=TicketRecord._safe_enum_parse(ticket_doc.get("priority"), Priority),
             type=TicketRecord._safe_enum_parse(ticket_doc.get("type"), ItemType),
@@ -1439,6 +1462,7 @@ class ProjectRecord(Record):
             preview_renderable=record_doc.get("previewRenderable", True),
             is_dependent_node=record_doc.get("isDependentNode", False),
             parent_node_id=record_doc.get("parentNodeId"),
+            is_placeholder=record_doc.get("isPlaceholder", False),
             status=project_doc.get("status"),
             priority=project_doc.get("priority"),
             lead_id=project_doc.get("leadId"),
@@ -2526,6 +2550,12 @@ class CodeFileRecord(Record):
 
     file_path: str | None = None
     file_hash: str | None = None
+    extension: str | None = None
+    language: str | None = None
+    # source | test | config | build | migration | script | type_definition |
+    # generated. Classified by the connector from the path alone; the resolver
+    # reads it instead of re-deriving "is this a test?" from the path.
+    file_role: str | None = None
 
     def to_kafka_record(self) -> dict:
         return {
@@ -2536,6 +2566,7 @@ class CodeFileRecord(Record):
             "connectorName": self.connector_name.value,
             "connectorId": self.connector_id,
             "mimeType": self.mime_type,
+            "extension": self.extension,
             "createdAtTimestamp": self.created_at,
             "updatedAtTimestamp": self.updated_at,
             "origin": self.origin.value,
@@ -2544,6 +2575,8 @@ class CodeFileRecord(Record):
             "sourceLastModifiedTimestamp": self.source_updated_at,
             "filePath": self.file_path,
             "fileHash": self.file_hash,
+            "language": self.language,
+            "fileRole": self.file_role,
         }
 
     def to_arango_record(self) -> dict:
@@ -2553,6 +2586,9 @@ class CodeFileRecord(Record):
             "name": self.record_name,
             "filePath": self.file_path,
             "fileHash": self.file_hash,
+            "extension": self.extension,
+            "language": self.language,
+            "fileRole": self.file_role,
         }
 
     @staticmethod
@@ -2565,6 +2601,13 @@ class CodeFileRecord(Record):
             connector_name = Connectors(conn_name_value) if conn_name_value else Connectors.KNOWLEDGE_BASE
         except ValueError:
             connector_name = Connectors.KNOWLEDGE_BASE
+        extension = arango_base_code_file_record.get("extension")
+        if not extension:
+            # Older code-file docs omitted extension; derive from name for reindex.
+            name = arango_base_record.get("recordName") or ""
+            base = name.rsplit("/", 1)[-1]
+            if "." in base:
+                extension = base.rsplit(".", 1)[-1].lower()
         return CodeFileRecord(
             id=arango_base_record.get("id", arango_base_record.get("_key")),
             org_id=arango_base_record["orgId"],
@@ -2604,6 +2647,9 @@ class CodeFileRecord(Record):
             reason=arango_base_record.get("reason"),
             file_path=arango_base_code_file_record.get("filePath"),
             file_hash=arango_base_code_file_record.get("fileHash"),
+            extension=extension,
+            language=arango_base_code_file_record.get("language"),
+            file_role=arango_base_code_file_record.get("fileRole"),
         )
 
 
@@ -2972,6 +3018,7 @@ class AppMetadata(BaseModel):
     updated_at_timestamp: int = Field(description="Epoch timestamp in milliseconds of app update")
     status: str | None = Field(default=None, description="Current sync status")
     is_locked: bool | None = Field(default=None, description="Whether the app is locked")
+    permission_model: str | None = Field(default=None, description="How the connector's records derive per-user visibility (PermissionModel: APP_LEVEL or RECORD_LEVEL)")
 
     @staticmethod
     def from_db_document(doc: dict[str, Any]) -> "AppMetadata":
@@ -2993,6 +3040,7 @@ class AppMetadata(BaseModel):
             updated_at_timestamp=doc.get("updatedAtTimestamp", 0),
             status=doc.get("status"),
             is_locked=doc.get("isLocked"),
+            permission_model=doc.get("permissionModel"),
         )
 
 class MeetingRecord(Record):

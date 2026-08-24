@@ -66,6 +66,7 @@ def _make_context(**overrides: Any) -> SimpleNamespace:
         "graph_provider": AsyncMock(),
         "full_records_fetched": set(),
         "tool_state": {},
+        "is_multimodal_llm": False,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -99,15 +100,15 @@ class TestExecuteFetchRecord:
              ):
             os.environ.pop("PIPESHUB_FULL_RECORD_MAX_BLOCKS", None)
             ctx = _make_context()
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=ctx,
                 virtual_records={"vr-1": {"id": "rec-1"}},
                 citation_ref_mapper=ref_mapper,
                 record_ids="rec-1",
             )
 
-        assert result["success"] is True
-        assert "Hello world" in result["text"]
+        assert output.success is True
+        assert "Hello world" in output.data
         assert "rec-1" in ctx.full_records_fetched
 
     @pytest.mark.asyncio
@@ -131,13 +132,13 @@ class TestExecuteFetchRecord:
             return_value=None,
         ):
             ctx = _make_context()
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=ctx,
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids="single-id",
             )
-        assert result["success"] is True
+        assert output.success is True
         call_kwargs = fake_tool.coroutine.call_args[1]
         assert call_kwargs["record_ids"] == ["single-id"]
 
@@ -155,14 +156,14 @@ class TestExecuteFetchRecord:
             "app.utils.chat_helpers.get_record_id_shortener_if_enabled",
             return_value=None,
         ):
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=_make_context(),
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids=["rec-1"],
             )
-        assert result["success"] is False
-        assert "db down" in result["error"]
+        assert output.success is False
+        assert "db down" in output.error
 
     @pytest.mark.asyncio
     async def test_not_available_ids_appended(self) -> None:
@@ -184,15 +185,15 @@ class TestExecuteFetchRecord:
             "app.utils.chat_helpers.get_record_id_shortener_if_enabled",
             return_value=None,
         ):
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=_make_context(),
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids=["rec-1", "rec-2"],
             )
-        assert result["success"] is True
-        assert "not available" in result["text"]
-        assert "rec-2" in result["text"]
+        assert output.success is True
+        assert "not available" in output.data
+        assert "rec-2" in output.data
 
     @pytest.mark.asyncio
     async def test_non_ok_result_returns_tool_output(self) -> None:
@@ -213,14 +214,14 @@ class TestExecuteFetchRecord:
             "app.agents.agent_loop.tool_adapter._to_tool_output",
             return_value=SimpleNamespace(success=False, data=None, error="record not found"),
         ):
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=_make_context(),
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids=["rec-1"],
             )
-        assert result["success"] is False
-        assert result["error"] == "record not found"
+        assert output.success is False
+        assert output.error == "record not found"
 
     @pytest.mark.asyncio
     async def test_record_id_shortener_resolves_and_shortens(self) -> None:
@@ -246,15 +247,15 @@ class TestExecuteFetchRecord:
             return_value=shortener,
         ):
             ctx = _make_context()
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=ctx,
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids=["R1"],
             )
         shortener.resolve.assert_called_once_with("R1")
-        assert result["success"] is True
-        assert "R1" in result["text"]
+        assert output.success is True
+        assert "R1" in output.data
 
     @pytest.mark.asyncio
     async def test_not_available_ids_shortened(self) -> None:
@@ -268,7 +269,7 @@ class TestExecuteFetchRecord:
         shortener = MagicMock()
         shortener.resolve = MagicMock(side_effect=lambda x: x)
         shortener.shorten_record_ids_in_text = MagicMock(side_effect=lambda t: t)
-        shortener.get_or_create_short_id = MagicMock(return_value="R2")
+        shortener.shorten_if_known = MagicMock(return_value="R2")
 
         with patch(
             "app.utils.fetch_full_record.create_fetch_full_record_tool",
@@ -280,15 +281,147 @@ class TestExecuteFetchRecord:
             "app.utils.chat_helpers.get_record_id_shortener_if_enabled",
             return_value=shortener,
         ):
-            result = await execute_fetch_record(
+            output, _ = await execute_fetch_record(
                 context=_make_context(),
                 virtual_records={},
                 citation_ref_mapper=ref_mapper,
                 record_ids=["rec-1", "rec-2"],
             )
-        assert "'R2'" in result["text"]
+        shortener.shorten_if_known.assert_called_once_with("rec-2")
+        assert "'R2'" in output.data
 
 
 class TestFetchRecordToolName:
     def test_constant_value(self) -> None:
         assert FETCH_RECORD_TOOL_NAME == "knowledgegraph__fetch_record"
+
+
+_MIN_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _image_record() -> dict[str, Any]:
+    from app.models.blocks import BlockType
+
+    return {
+        "id": "rec-1",
+        "virtual_record_id": "vr-1",
+        "frontend_url": "https://a.com",
+        "context_metadata": "ctx",
+        "block_containers": {
+            "blocks": [
+                {
+                    "index": 0,
+                    "type": BlockType.IMAGE.value,
+                    "parent_index": None,
+                    "data": {"uri": _MIN_PNG_DATA_URI},
+                },
+            ],
+            "block_groups": [],
+        },
+    }
+
+
+def _fake_tool_returning(records: list[dict[str, Any]]) -> MagicMock:
+    tool = MagicMock()
+    tool.coroutine = AsyncMock(
+        return_value={"ok": True, "records": records, "not_available_ids": []}
+    )
+    return tool
+
+
+class TestExecuteFetchRecordImageDelivery:
+    """Regression: `record_to_message_content` was called without
+    `is_multimodal_llm`, so a record whose only block is an IMAGE rendered to
+    an empty string and the image never reached the model."""
+
+    @pytest.mark.asyncio
+    async def test_multimodal_returns_multipart_with_image_part(self) -> None:
+        from app.agent_loop_lib.core.messages import ImagePart, TextPart
+        from app.utils.chat_helpers import CitationRefMapper
+
+        ctx = _make_context(is_multimodal_llm=True)
+        with patch(
+            "app.utils.fetch_full_record.create_fetch_full_record_tool",
+            return_value=_fake_tool_returning([_image_record()]),
+        ):
+            output, _ = await execute_fetch_record(
+                context=ctx,
+                virtual_records={"vr-1": _image_record()},
+                citation_ref_mapper=CitationRefMapper(),
+                record_ids=["rec-1"],
+            )
+
+        assert output.success is True
+        assert isinstance(output.data, list)
+        images = [p for p in output.data if isinstance(p, ImagePart)]
+        assert len(images) == 1
+        from app.agent_loop_lib.core.messages import image_data_url
+
+        assert images[0].source.type == "base64"
+        assert image_data_url(images[0].source) == _MIN_PNG_DATA_URI
+        assert any(isinstance(p, TextPart) for p in output.data)
+        # Native multipart support is the default, so no fallback stash.
+        assert "pending_tool_images" not in ctx.tool_state
+
+    @pytest.mark.asyncio
+    async def test_non_multimodal_returns_plain_text(self) -> None:
+        from app.utils.chat_helpers import CitationRefMapper
+
+        ctx = _make_context(is_multimodal_llm=False)
+        with patch(
+            "app.utils.fetch_full_record.create_fetch_full_record_tool",
+            return_value=_fake_tool_returning([_image_record()]),
+        ):
+            output, _ = await execute_fetch_record(
+                context=ctx,
+                virtual_records={"vr-1": _image_record()},
+                citation_ref_mapper=CitationRefMapper(),
+                record_ids=["rec-1"],
+            )
+
+        assert isinstance(output.data, str)
+
+    @pytest.mark.asyncio
+    async def test_without_native_multipart_support_stashes_fallback(self) -> None:
+        from app.utils.chat_helpers import CitationRefMapper
+
+        ctx = _make_context(is_multimodal_llm=True)
+        ctx.tool_state["supports_multipart_tool_result"] = False
+        with patch(
+            "app.utils.fetch_full_record.create_fetch_full_record_tool",
+            return_value=_fake_tool_returning([_image_record()]),
+        ):
+            output, _ = await execute_fetch_record(
+                context=ctx,
+                virtual_records={"vr-1": _image_record()},
+                citation_ref_mapper=CitationRefMapper(),
+                record_ids=["rec-1"],
+            )
+
+        assert isinstance(output.data, list)
+        assert len(ctx.tool_state["pending_tool_images"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_shared_image_budget_is_debited(self) -> None:
+        """The fetch must draw on the same conversation-wide budget as
+        retrieval/attachments, not a private one."""
+        from app.utils.chat_helpers import CitationRefMapper, ImageBudget
+
+        budget = ImageBudget(max_images=1)
+        ctx = _make_context(is_multimodal_llm=True)
+        ctx.tool_state["image_budget"] = budget
+        with patch(
+            "app.utils.fetch_full_record.create_fetch_full_record_tool",
+            return_value=_fake_tool_returning([_image_record()]),
+        ):
+            await execute_fetch_record(
+                context=ctx,
+                virtual_records={"vr-1": _image_record()},
+                citation_ref_mapper=CitationRefMapper(),
+                record_ids=["rec-1"],
+            )
+
+        assert budget.used == 1

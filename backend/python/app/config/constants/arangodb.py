@@ -43,6 +43,7 @@ class Connectors(Enum):
     MICROSOFT_TEAMS = "MICROSOFT TEAMS"
 
     NOTION = "NOTION"
+    NOTION_PERSONAL = "NOTION PERSONAL"
     SLACK = "SLACK"
     SLACK_WORKSPACE = "SLACK WORKSPACE"
 
@@ -62,6 +63,7 @@ class Connectors(Enum):
     WEB = "WEB"
     BOOKSTACK = "BOOKSTACK"
     GITHUB = "GITHUB"
+    GITHUB_TEAMS = "GITHUB TEAMS"
     SERVICENOW = "SERVICENOW"
     SALESFORCE = "SALESFORCE"
     S3 = "S3"
@@ -89,6 +91,22 @@ class Connectors(Enum):
     DATABASE_SANDBOX = "DATABASE_SANDBOX"
     IMAGE_GENERATION = "IMAGE_GENERATION"
     ATTACHMENTS = "ATTACHMENTS"
+
+
+class PermissionModel(Enum):
+    """How a connector's records derive their per-user visibility.
+
+    ``APP_LEVEL`` means access to the connector app implies access to every
+    record it syncs — the source has no per-record ACLs, so each connector
+    writes one blanket ORG (or single creator-USER) permission. ``RECORD_LEVEL``
+    means the source syncs real per-record ACLs and visibility must be resolved
+    per user. Declared per connector via ``ConnectorBuilder.configure(...)``;
+    ``RECORD_LEVEL`` is the default because assuming per-record ACLs can only
+    under-share, never over-share.
+    """
+
+    APP_LEVEL = "APP_LEVEL"
+    RECORD_LEVEL = "RECORD_LEVEL"
 
 
 class AppGroups(Enum):
@@ -239,11 +257,14 @@ class CollectionNames(Enum):
     AGENT_KNOWLEDGE = "agentKnowledge"
     AGENT_TOOLSETS = "agentToolsets"
     AGENT_TOOLS = "agentTools"
+    AGENT_MCP_SERVERS = "agentMcpServers"
 
     # Agent Builder Graph edges
     AGENT_HAS_KNOWLEDGE = "agentHasKnowledge"
     AGENT_HAS_TOOLSET = "agentHasToolset"
     TOOLSET_HAS_TOOL = "toolsetHasTool"
+    AGENT_HAS_MCP_SERVER = "agentHasMcpServer"
+    MCP_SERVER_HAS_TOOL = "mcpServerHasTool"
 
     # Agent Skills collections (agent_loop_lib SkillManager — GraphSkillStore)
     AGENT_SKILLS = "agentSkills"
@@ -282,8 +303,11 @@ class ExtensionTypes(Enum):
     SVG = "svg"
     HEIC = "heic"
     HEIF = "heif"
+    EPUB = "epub"
     SQL_TABLE = "sql_table"  
     SQL_VIEW = "sql_view"
+    # Registry key for the tree-sitter code parser; not a file extension.
+    CODE = "code"
     PY = "py"
     JS = "js"
     JSX = "jsx"
@@ -354,6 +378,7 @@ class MimeTypes(Enum):
     HEIF = "image/heif"
     ZIP = "application/zip"
     GIF = "image/gif"
+    EPUB = "application/epub+zip"
     PYTHON = "text/x-python"
     PYTHON_SCRIPT = "text/x-python-script"
     PYTHON_SCRIPT_X = "text/x-script.python"
@@ -458,6 +483,7 @@ FILE_MIME_TYPES = {
     '.htm': MimeTypes.HTML,
     '.md': MimeTypes.MARKDOWN,
     '.mdx': MimeTypes.MDX,
+    '.epub': MimeTypes.EPUB,
 }
 
 
@@ -507,6 +533,33 @@ RECONCILIATION_ENABLED_EXTENSIONS = {
     ExtensionTypes.MD.value,
     ExtensionTypes.MDX.value,
     ExtensionTypes.HTML.value
+}
+
+# Extensions that make a repository blob a CODE_FILE record. Connectors that walk
+# a git tree (GitLab, GitHub) classify each blob against this set; anything outside
+# it is an ordinary FILE record and is gated by the generic mime/extension allowlist
+# instead. Text-based only — a binary listed here would be fed to the code parser.
+SUPPORTED_CODE_FILE_EXTENSIONS = {
+    # C / C++
+    "c", "h", "cpp", "cc", "cxx", "hpp", "hxx",
+    # C#
+    "cs",
+    # Java / JVM
+    "java", "kt", "kts", "scala", "groovy", "gradle",
+    # Python
+    "py", "pyi",
+    # JavaScript / TypeScript
+    "js", "jsx", "mjs", "cjs", "ts", "tsx", "vue", "svelte",
+    # Go / Rust / Ruby / PHP / Swift / Dart
+    "go", "rs", "rb", "php", "swift", "dart",
+    # Other languages
+    "lua", "pl", "pm", "r", "ex", "exs", "erl", "hs", "clj", "cljs",
+    # Shell
+    "sh", "bash", "zsh", "fish", "ps1",
+    # Markup / stylesheets
+    "html", "htm", "css", "scss", "sass", "less", "md",
+    # Schema / IDL / infra-as-code
+    "sql", "proto", "graphql", "gql", "tf", "tfvars",
 }
 
 

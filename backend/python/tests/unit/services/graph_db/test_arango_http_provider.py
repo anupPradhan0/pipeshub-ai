@@ -4647,6 +4647,139 @@ class TestDeleteRecordsRecursive:
 
 
 # ---------------------------------------------------------------------------
+# delete_single_record
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSingleRecord:
+    @pytest.mark.asyncio
+    async def test_empty_id(self, connected_provider):
+        result = await connected_provider.delete_single_record("")
+        assert result["success"] is True
+        assert result["total_requested"] == 0
+        assert result["eventData"] is None
+
+    @pytest.mark.asyncio
+    async def test_found_with_event(self, connected_provider):
+        inventory = {
+            "valid_root_keys": ["r1"],
+            "records_with_type": [{
+                "record": {
+                    "_key": "r1",
+                    "recordName": "doc.pdf",
+                    "virtualRecordId": "virt-1",
+                    "connectorName": "GITHUB",
+                    "origin": "CONNECTOR",
+                },
+                "type_target": {"doc": {}, "collection": "files", "key": "r1"},
+            }],
+        }
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock(return_value="txn1")), \
+             patch.object(connected_provider, "execute_query", AsyncMock(return_value=[inventory])), \
+             patch.object(connected_provider, "_delete_edges_by_node_ids", AsyncMock()) as mock_edges, \
+             patch.object(connected_provider, "_delete_isoftype_targets_from_collected", AsyncMock()) as mock_type, \
+             patch.object(connected_provider, "_delete_nodes_by_keys", AsyncMock()) as mock_nodes, \
+             patch.object(connected_provider, "commit_transaction", AsyncMock()), \
+             patch.object(connected_provider, "_create_deleted_record_event_payload", AsyncMock(return_value={"recordId": "r1"})):
+            result = await connected_provider.delete_single_record("r1")
+
+        mock_edges.assert_awaited_once()
+        mock_type.assert_awaited_once()
+        mock_nodes.assert_awaited_once()
+        assert result["successfully_deleted"] == 1
+        assert result["eventData"]["eventType"] == "deleteRecord"
+        assert result["eventData"]["payloads"][0]["connectorName"] == "GITHUB"
+
+    @pytest.mark.asyncio
+    async def test_missing_is_noop(self, connected_provider):
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock(return_value="txn1")), \
+             patch.object(connected_provider, "execute_query", AsyncMock(return_value=[])), \
+             patch.object(connected_provider, "commit_transaction", AsyncMock()) as mock_commit, \
+             patch.object(connected_provider, "_delete_nodes_by_keys", AsyncMock()) as mock_nodes:
+            result = await connected_provider.delete_single_record("missing")
+
+        mock_commit.assert_awaited_once()
+        mock_nodes.assert_not_awaited()
+        assert result["success"] is True
+        assert result["successfully_deleted"] == 0
+        assert result["eventData"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_virtual_record_id(self, connected_provider):
+        inventory = {
+            "valid_root_keys": ["r1"],
+            "records_with_type": [{
+                "record": {"_key": "r1", "recordName": "draft.txt", "connectorName": "GITHUB", "origin": "CONNECTOR"},
+                "type_target": {"doc": {}, "collection": "files", "key": "r1"},
+            }],
+        }
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock(return_value="txn1")), \
+             patch.object(connected_provider, "execute_query", AsyncMock(return_value=[inventory])), \
+             patch.object(connected_provider, "_delete_edges_by_node_ids", AsyncMock()), \
+             patch.object(connected_provider, "_delete_isoftype_targets_from_collected", AsyncMock()), \
+             patch.object(connected_provider, "_delete_nodes_by_keys", AsyncMock()), \
+             patch.object(connected_provider, "commit_transaction", AsyncMock()):
+            result = await connected_provider.delete_single_record("r1")
+
+        assert result["successfully_deleted"] == 1
+        assert result["eventData"] is None
+
+    @pytest.mark.asyncio
+    async def test_db_error_rolls_back(self, connected_provider):
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock(return_value="txn1")), \
+             patch.object(connected_provider, "execute_query", AsyncMock(side_effect=RuntimeError("query failed"))), \
+             patch.object(connected_provider, "rollback_transaction", AsyncMock()) as mock_rb:
+            result = await connected_provider.delete_single_record("r1")
+
+        assert result["success"] is False
+        assert result["code"] == 500
+        mock_rb.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_external_transaction_not_committed(self, connected_provider):
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock()) as mock_begin, \
+             patch.object(connected_provider, "execute_query", AsyncMock(return_value=[])), \
+             patch.object(connected_provider, "commit_transaction", AsyncMock()) as mock_commit:
+            await connected_provider.delete_single_record("r1", transaction="ext-txn")
+
+        mock_begin.assert_not_awaited()
+        mock_commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_payload_build_failure_still_deletes(self, connected_provider):
+        inventory = {
+            "valid_root_keys": ["r1"],
+            "records_with_type": [{
+                "record": {
+                    "_key": "r1",
+                    "recordName": "doc.pdf",
+                    "virtualRecordId": "virt-1",
+                    "connectorName": "GITHUB",
+                    "origin": "CONNECTOR",
+                },
+                "type_target": {"doc": {}, "collection": "files", "key": "r1"},
+            }],
+        }
+        with patch.object(connected_provider, "_get_all_edge_collections", AsyncMock(return_value=["permission"])), \
+             patch.object(connected_provider, "begin_transaction", AsyncMock(return_value="txn1")), \
+             patch.object(connected_provider, "execute_query", AsyncMock(return_value=[inventory])), \
+             patch.object(connected_provider, "_delete_edges_by_node_ids", AsyncMock()), \
+             patch.object(connected_provider, "_delete_isoftype_targets_from_collected", AsyncMock()), \
+             patch.object(connected_provider, "_delete_nodes_by_keys", AsyncMock()), \
+             patch.object(connected_provider, "commit_transaction", AsyncMock()), \
+             patch.object(connected_provider, "_create_deleted_record_event_payload", AsyncMock(side_effect=RuntimeError("bad payload"))):
+            result = await connected_provider.delete_single_record("r1")
+
+        assert result["success"] is True
+        assert result["eventData"] is None
+
+
+# ---------------------------------------------------------------------------
 # delete_connector_instance
 # ---------------------------------------------------------------------------
 
@@ -14315,6 +14448,8 @@ class TestHardDeleteAllAgents:
                 [{"_key": "tool1"}],  # tool nodes
                 [{"_key": "tse1"}],  # toolset edges
                 [{"_key": "ts1"}],  # toolset nodes
+                [],  # no mcp server ids
+                [],  # no agent->mcp server edges deleted
                 [{"_key": "pe1"}],  # permission edges
                 [{"_key": "a1"}],  # agent docs
             ]
@@ -14324,6 +14459,7 @@ class TestHardDeleteAllAgents:
         assert result["toolsets_deleted"] == 1
         assert result["tools_deleted"] == 1
         assert result["knowledge_deleted"] == 1
+        assert result["mcp_servers_deleted"] == 0
 
     @pytest.mark.asyncio
     async def test_nothing_to_delete(self, connected_provider):
@@ -14333,12 +14469,15 @@ class TestHardDeleteAllAgents:
                 None,  # no toolset ids
                 None,  # no toolset edges
                 None,  # no toolsets
+                None,  # no mcp server ids
+                None,  # no agent->mcp server edges deleted
                 None,  # no permissions
                 None,  # no agents
             ]
         )
         result = await connected_provider.hard_delete_all_agents()
         assert result["agents_deleted"] == 0
+        assert result["mcp_servers_deleted"] == 0
 
     @pytest.mark.asyncio
     async def test_exception(self, connected_provider):
@@ -15292,6 +15431,10 @@ class TestGetAppChildrenSubquery:
     def test_contains_aql(self, connected_provider):
         sub_query, _ = connected_provider._get_app_children_subquery("app1", "org1", "uk1")
         assert "raw_children" in sub_query
+
+    def test_kb_app_children_projects_reason(self, connected_provider):
+        sub_query, _ = connected_provider._get_app_children_subquery("app1", "org1", "uk1")
+        assert "reason: record.reason" in sub_query
 
 
 # ---------------------------------------------------------------------------
@@ -16915,6 +17058,10 @@ class TestHardDeleteAgent:
             [{"_key": "e1"}],
             # deleted_toolsets from step 7
             [{"_key": "ts1"}],
+            # mcp_server_ids (no MCP servers attached)
+            [],
+            # deleted_mcp_server_edges (none)
+            [],
             # deleted_permissions from step 8
             [{"_key": "p1"}, {"_key": "p2"}],
             # deleted_agents from step 9
@@ -16926,6 +17073,7 @@ class TestHardDeleteAgent:
         assert result["knowledge_deleted"] == 1
         assert result["tools_deleted"] == 1
         assert result["toolsets_deleted"] == 1
+        assert result["mcp_servers_deleted"] == 0
         assert result["edges_deleted"] > 0
 
     @pytest.mark.asyncio
@@ -16935,6 +17083,8 @@ class TestHardDeleteAgent:
             [],    # no knowledge_ids
             [],    # no toolset_ids
             [],    # no toolset edges deleted
+            [],    # no mcp_server_ids
+            [],    # no deleted_mcp_server_edges
             [],    # no permissions
             [{"_key": "a1"}],  # agent deleted
         ])
@@ -16944,6 +17094,7 @@ class TestHardDeleteAgent:
         assert result["knowledge_deleted"] == 0
         assert result["tools_deleted"] == 0
         assert result["toolsets_deleted"] == 0
+        assert result["mcp_servers_deleted"] == 0
 
     @pytest.mark.asyncio
     async def test_knowledge_with_no_orphans(self, connected_provider):
@@ -16953,6 +17104,8 @@ class TestHardDeleteAgent:
             [],                       # no deleted_knowledge (still referenced)
             [],                       # no toolsets
             [],                       # no toolset edges
+            [],                       # no mcp_server_ids
+            [],                       # no deleted_mcp_server_edges
             [],                       # no permissions
             [{"_key": "a1"}],         # agent deleted
         ])
@@ -16971,6 +17124,8 @@ class TestHardDeleteAgent:
             [],                      # no deleted_tools (still referenced)
             [{"_key": "e1"}],        # toolset edges deleted
             [],                      # no deleted_toolsets (still referenced)
+            [],                      # no mcp_server_ids
+            [],                      # no deleted_mcp_server_edges
             [],                      # no permissions
             [{"_key": "a1"}],        # agent deleted
         ])
@@ -16979,6 +17134,7 @@ class TestHardDeleteAgent:
         assert result["agents_deleted"] == 1
         assert result["tools_deleted"] == 0
         assert result["toolsets_deleted"] == 0
+        assert result["mcp_servers_deleted"] == 0
 
     @pytest.mark.asyncio
     async def test_exception_returns_zeros(self, connected_provider):
@@ -16989,6 +17145,7 @@ class TestHardDeleteAgent:
         assert result["tools_deleted"] == 0
         assert result["knowledge_deleted"] == 0
         assert result["edges_deleted"] == 0
+        assert result["mcp_servers_deleted"] == 0
 
     @pytest.mark.asyncio
     async def test_permissions_deleted(self, connected_provider):
@@ -16997,6 +17154,8 @@ class TestHardDeleteAgent:
             [],                      # no knowledge
             [],                      # no toolsets
             [{"_key": "te1"}],       # toolset edges deleted
+            [],                      # no mcp_server_ids
+            [],                      # no deleted_mcp_server_edges
             [{"_key": "p1"}, {"_key": "p2"}, {"_key": "p3"}],  # 3 permissions deleted
             [{"_key": "a1"}],        # agent deleted
         ])

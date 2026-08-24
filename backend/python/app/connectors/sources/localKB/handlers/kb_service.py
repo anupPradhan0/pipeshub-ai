@@ -13,6 +13,7 @@ from app.config.constants.arangodb import (
 from app.config.constants.service import DefaultEndpoints, config_node_constants
 from app.connectors.services.kafka_service import KafkaService
 from app.models.entities import FileRecord, RecordType
+from app.services.cache.invalidation_hooks import notify_kb_records_changed
 from app.services.graph_db.interface.graph_db_provider import IGraphDBProvider
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
@@ -34,6 +35,19 @@ MONGO_USER_GRAPH_KEY_LOOKUP_CHUNK_SIZE = 500
 # KB folders use this mime type in the RECORDS doc (matches the legacy create_folder
 # path). Note this differs from MimeTypes.FOLDER ("text/directory").
 KB_FOLDER_MIME_TYPE = "application/vnd.folder"
+
+def _mutation_succeeded(result: object) -> bool:
+    """Did a graph-provider permission mutation actually succeed?
+
+    The providers disagree on the return contract: arango's
+    `remove_kb_permission` returns a bare bool, every other path returns a dict
+    carrying `success`. A failure dict is still truthy, so a plain
+    `if result:` reported provider failures to the caller as success.
+    """
+    if isinstance(result, dict):
+        return bool(result.get("success"))
+    return bool(result)
+
 
 class KnowledgeBaseService:
     """Data handler for knowledge base operations."""
@@ -718,6 +732,10 @@ class KnowledgeBaseService:
                 kb_id, folder_id, name, org_id, parent_folder_id=None
             )
             await self.processor.on_new_records([(folder_record, [])])
+            # Folders are born COMPLETED, so they never pass through the indexing
+            # hook. They carry no virtualRecordId today and so cannot appear in an
+            # accessible-record map — this keeps the KB's entry honest if that changes.
+            await notify_kb_records_changed(kb_id, org_id)
 
             return {
                 "id": folder_id,
@@ -783,6 +801,10 @@ class KnowledgeBaseService:
                 kb_id, folder_id, name, org_id, parent_folder_id=parent_folder_id
             )
             await self.processor.on_new_records([(folder_record, [])])
+            # Folders are born COMPLETED, so they never pass through the indexing
+            # hook. They carry no virtualRecordId today and so cannot appear in an
+            # accessible-record map — this keeps the KB's entry honest if that changes.
+            await notify_kb_records_changed(kb_id, org_id)
 
             return {
                 "id": folder_id,
@@ -966,13 +988,29 @@ class KnowledgeBaseService:
             # which cascades to remove the folder + all descendants (records/subfolders +
             # edges + files docs) and publishes a deleteRecord event per contained file,
             # so the router does not need to publish eventData for this path.
-            await self.processor.on_records_deleted_cascade([folder_id], kb_id)
+            cascade_result = await self.processor.on_records_deleted_cascade([folder_id], kb_id)
+            if not (cascade_result and cascade_result.get("success")):
+                # The recursive delete itself failed (not just the cleanup-event
+                # publish) — do not report a success the graph doesn't back up.
+                self.logger.error(f"❌ Failed to delete folder {folder_id}: {cascade_result}")
+                return cascade_result or {
+                    "success": False,
+                    "code": 500,
+                    "reason": "Failed to delete folder",
+                }
             self.logger.info(f"🎉 Folder {folder_id} and ALL contents deleted successfully by {user_id}")
-            return {
+            response = {
                 "success": True,
                 "reason": "Folder and all contents deleted successfully",
                 "code": 200,
             }
+            if (cascade_result or {}).get("vectorCleanupPending"):
+                # Graph deletion committed; only the vector-cleanup event publish
+                # failed after retries. Report the deletion as what it is
+                # (successful) while flagging that embeddings need reconciliation.
+                response["vectorCleanupPending"] = True
+                response["vectorCleanupFailedRecordIds"] = cascade_result["vectorCleanupFailedRecordIds"]
+            return response
 
         except Exception as e:
             self.logger.error(f"❌ Failed to delete folder: {str(e)}")
@@ -1281,6 +1319,11 @@ class KnowledgeBaseService:
 
             if result.get("success"):
                 self.logger.info(f"✅ Permissions created: {result['grantedCount']} granted")
+                # A revoked user keeps reading this KB until the entry
+                # expires otherwise: the cache is only invalidated on
+                # record-set changes, and a permission edit changes no
+                # records. Rare enough that the extra DEL costs nothing.
+                await notify_kb_records_changed(kb_id)
                 return result
             else:
                 self.logger.error(f"❌ Permission creation failed: {result.get('reason')}")
@@ -1482,12 +1525,17 @@ class KnowledgeBaseService:
                 new_role=new_role
             )
 
-            if result:
+            if _mutation_succeeded(result):
                 success_msg = f"✅ Permission updated successfully for {len(valid_user_ids)} users and {len(valid_team_ids)} teams"
                 if skipped_users or skipped_teams:
                     success_msg += f" (skipped {len(skipped_users)} users and {len(skipped_teams)} teams without permissions)"
                 self.logger.info(success_msg)
 
+                # A revoked user keeps reading this KB until the entry
+                # expires otherwise: the cache is only invalidated on
+                # record-set changes, and a permission edit changes no
+                # records. Rare enough that the extra DEL costs nothing.
+                await notify_kb_records_changed(kb_id)
                 return {
                     "success": True,
                     "userIds": valid_user_ids,
@@ -1495,12 +1543,15 @@ class KnowledgeBaseService:
                     "newRole": new_role,
                     "kbId": kb_id,
                 }
-            else:
-                return {
-                    "success": False,
-                    "reason": "Failed to update permission",
-                    "code": 500
-                }
+            # Propagate the provider's own reason when it gave one; the
+            # generic message is only for the bare-bool contract.
+            if isinstance(result, dict):
+                return result
+            return {
+                "success": False,
+                "reason": "Failed to update permission",
+                "code": 500
+            }
 
         except Exception as e:
             self.logger.error(f"❌ Failed to update KB permission: {str(e)}")
@@ -1657,25 +1708,33 @@ class KnowledgeBaseService:
                 team_ids=valid_team_ids
             )
 
-            if result:
+            if _mutation_succeeded(result):
                 success_msg = f"✅ Permission removed successfully for {len(valid_user_ids)} users and {len(valid_team_ids)} teams"
                 if skipped_users or skipped_teams:
                     success_msg += f" (skipped {len(skipped_users)} users and {len(skipped_teams)} teams without permissions)"
                 self.logger.info(success_msg)
 
 
+                # A revoked user keeps reading this KB until the entry
+                # expires otherwise: the cache is only invalidated on
+                # record-set changes, and a permission edit changes no
+                # records. Rare enough that the extra DEL costs nothing.
+                await notify_kb_records_changed(kb_id)
                 return {
                     "success": True,
                     "userIds": valid_user_ids,
                     "teamIds": valid_team_ids,
                     "kbId": kb_id,
                 }
-            else:
-                return {
-                    "success": False,
-                    "reason": "Failed to remove permissions",
-                    "code": 500
-                }
+            # Propagate the provider's own reason when it gave one; the
+            # generic message is only for the bare-bool contract.
+            if isinstance(result, dict):
+                return result
+            return {
+                "success": False,
+                "reason": "Failed to remove permissions",
+                "code": 500
+            }
 
         except Exception as e:
             self.logger.error(f"❌ Failed to remove KB permission: {str(e)}")

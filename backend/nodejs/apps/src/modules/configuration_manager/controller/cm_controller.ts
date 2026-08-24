@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { Response, NextFunction } from 'express';
 import {
   AuthenticatedServiceRequest,
@@ -636,7 +636,7 @@ export const createSlackBotConfig =
 
           const timestamp = new Date().toISOString();
           const createdConfig: SlackBotConfigEntry = {
-            id: uuidv4(),
+            id: randomUUID(),
             name,
             botToken,
             signingSecret,
@@ -811,6 +811,30 @@ export const getAvailablePlatformFeatureFlags =
     // Labs UI.
     const flags = PLATFORM_FEATURE_FLAGS.filter((f) => !f.hidden);
     res.status(200).json({ flags }).end();
+  };
+
+export const getEffectivePlatformFeatureFlags =
+  (keyValueStoreService: KeyValueStoreService) =>
+  async (
+    _req: AuthenticatedUserRequest | AuthenticatedServiceRequest,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    // Unlike getPlatformSettings/getAvailablePlatformFeatureFlags (admin-only),
+    // this is callable by every authenticated user: flag values are just
+    // booleans (no secrets), and non-admin UI (chat, agent builder, personal
+    // pages) needs them to decide whether to render flag-gated features.
+    try {
+      const { featureFlags } = await getPlatformSettingsFromStore(
+        keyValueStoreService,
+      );
+      res.status(200).json({ featureFlags }).end();
+    } catch (error: any) {
+      logger.error('Error getting effective platform feature flags', {
+        error,
+      });
+      next(error);
+    }
   };
 
 export const getAzureAdAuthConfig =
@@ -2559,7 +2583,7 @@ export const createAIModelsConfig =
 
       if (aiConfig.llm.length > 0) {
         aiConfig.llm.forEach((llm: any, index: number) => {
-          const modelKey = uuidv4();
+          const modelKey = randomUUID();
           llm.modelKey = modelKey;
           llm.isMultimodal = false;
           llm.isReasoning = false;
@@ -2569,7 +2593,7 @@ export const createAIModelsConfig =
 
       if (aiConfig.embedding.length > 0) {
         aiConfig.embedding.forEach((embedding: any, index: number) => {
-          const modelKey = uuidv4();
+          const modelKey = randomUUID();
           embedding.modelKey = modelKey;
           embedding.isMultimodal = false;
           embedding.isDefault = index === 0;
@@ -3164,7 +3188,7 @@ export const addAIModelProvider =
       let modelKey: string;
       let existingKeys: string[];
       do {
-        modelKey = uuidv4();
+        modelKey = randomUUID();
         existingKeys = aiModels[modelType].map(
           (config: any) => config.modelKey,
         );
@@ -4320,7 +4344,7 @@ export const addWebSearchProvider =
       }
 
       // Generate a unique providerKey
-      const providerKey = uuidv4();
+      const providerKey = randomUUID();
 
       // If this is set as default, remove default flag from other providers
       if (isDefault) {

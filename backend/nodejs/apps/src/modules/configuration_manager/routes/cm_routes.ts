@@ -51,6 +51,7 @@ import {
   getPlatformSettings,
   setPlatformSettings,
   getAvailablePlatformFeatureFlags,
+  getEffectivePlatformFeatureFlags,
   getCustomSystemPrompt,
   setCustomSystemPrompt,
   getWebSearchProviders,
@@ -349,6 +350,12 @@ export function createConfigurationManagerRouter(container: Container): Router {
     getSmtpConfig(keyValueStoreService),
   );
 
+  router.get(
+    '/internal/smtpConfig',
+    authMiddleware.scopedTokenValidator(TokenScopes.FETCH_CONFIG),
+    getSmtpConfig(keyValueStoreService),
+  );
+
   // auth config routes
   router.get(
     '/authConfig/azureAd',
@@ -486,6 +493,14 @@ export function createConfigurationManagerRouter(container: Container): Router {
     requireScopes(OAuthScopeNames.CONFIG_READ),
     userAdminCheck,
     getAvailablePlatformFeatureFlags(),
+  );
+
+  // Effective feature flag values — every authenticated user (not just admins)
+  // needs these to decide whether to render flag-gated UI (e.g. MCP).
+  router.get(
+    '/platform/feature-flags/effective',
+    authMiddleware.authenticate,
+    getEffectivePlatformFeatureFlags(keyValueStoreService),
   );
 
   // Slack Bot configuration

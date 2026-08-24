@@ -25,6 +25,8 @@ import {
   AgentStrategyModePanel,
   PlusMenuButton,
   PlusMenuSheet,
+  PlusMenuTriggerIcon,
+  hasNonDefaultSearchCapabilities,
 } from '@/chat/components/chat-panel';
 import { MobileQueryOptionsSheet } from '@/chat/components/chat-panel/expansion-panels/mobile-query-options-sheet';
 import { getQueryModeConfig } from '@/chat/constants';
@@ -298,6 +300,10 @@ export function ChatInput({
     agentHasInternalSearch,
     agentHasWebSearch,
   ]);
+  const showPlusMenuFilterBadge = hasNonDefaultSearchCapabilities(
+    plusMenuCapabilities.internalSearch,
+    plusMenuCapabilities.webSearch,
+  );
 
   // Context key for the active (agent-scoped or assistant) chat. All
   // model-related reads/writes below are keyed by this so assistant selections
@@ -369,9 +375,15 @@ export function ChatInput({
         agentToolCatalogLen > 0 &&
         (agentStreamToolsSel.length === 0 || agentStreamToolsSel.length < agentToolCatalogLen)));
 
-  /** Universal agent mode has an explicit tool selection (not null = "all tools"). */
+  /** Universal agent mode: tools explicitly customized OR connectors/collections selected. */
   const universalAgentResourcesCustomized =
-    !isAgentChat && settings.queryMode === 'agent' && universalAgentStreamTools !== null;
+    !isAgentChat && settings.queryMode === 'agent' && (universalAgentStreamTools !== null || selectedKbCount > 0);
+
+  const showResourcesFilterBadge = isAgentChat
+    ? agentResourcesCustomized
+    : settings.queryMode === 'agent'
+      ? universalAgentResourcesCustomized
+      : selectedKbCount > 0;
 
   /** True when universal agent tool data is loading (disable send while loading). */
   const isUniversalAgentLoading =
@@ -1802,10 +1814,19 @@ export function ChatInput({
                 size="2"
                 disabled={isRegenerateMode}
                 onClick={() => setIsMobilePlusMenuOpen(true)}
-                aria-label={t('chat.plusMenu.ariaLabel', { defaultValue: 'Attach files and capabilities' })}
+                aria-label={
+                  showPlusMenuFilterBadge
+                    ? t('chat.plusMenu.ariaLabelFiltersApplied', {
+                        defaultValue: 'Attach files and capabilities. Search filters applied',
+                      })
+                    : t('chat.plusMenu.ariaLabel', { defaultValue: 'Attach files and capabilities' })
+                }
                 style={{ margin: 0, cursor: isRegenerateMode ? 'default' : 'pointer' }}
               >
-                <MaterialIcon name="add" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                <PlusMenuTriggerIcon
+                  color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor}
+                  showFilterBadge={showPlusMenuFilterBadge}
+                />
               </IconButton>
             ) : (
               <PlusMenuButton
@@ -1912,7 +1933,25 @@ export function ChatInput({
                             : 'transparent',
                       }}
                     >
-                      <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                      <Box style={{ position: 'relative', display: 'inline-flex' }}>
+                        <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                        {showResourcesFilterBadge && !(isAgentChat ? isAgentResourcesPanelOpen : isCollectionsPanelOpen) && (
+                          <Box
+                            aria-hidden
+                            style={{
+                              position: 'absolute',
+                              top: -1,
+                              right: -1,
+                              width: 7,
+                              height: 7,
+                              borderRadius: '50%',
+                              backgroundColor: 'var(--red-9)',
+                              boxShadow: '0 0 0 1.5px var(--color-panel-solid)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                      </Box>
                       <Text size="2" style={{ color: isRegenerateMode ? 'var(--slate-5)' : 'var(--slate-12)' }}>
                         {isAgentChat
                           ? t('chat.agentResourcesTooltip', { defaultValue: 'Connectors & actions' })
@@ -2035,7 +2074,25 @@ export function ChatInput({
                       }}
                       style={{ margin: 0, cursor: isRegenerateMode ? 'default' : 'pointer' }}
                     >
-                      <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                      <Box style={{ position: 'relative', display: 'inline-flex' }}>
+                        <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                        {showResourcesFilterBadge && !isCollectionsPanelOpen && (
+                          <Box
+                            aria-hidden
+                            style={{
+                              position: 'absolute',
+                              top: -1,
+                              right: -1,
+                              width: 7,
+                              height: 7,
+                              borderRadius: '50%',
+                              backgroundColor: 'var(--red-9)',
+                              boxShadow: '0 0 0 1.5px var(--color-panel-solid)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                      </Box>
                     </IconButton>
                   </Tooltip>
                 ) : isAgentChat ? (
@@ -2060,7 +2117,25 @@ export function ChatInput({
                       }}
                       style={{ margin: 0, cursor: isRegenerateMode ? 'default' : 'pointer' }}
                     >
-                      <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                      <Box style={{ position: 'relative', display: 'inline-flex' }}>
+                        <MaterialIcon name="apps" size={ICON_SIZES.PRIMARY} color={isRegenerateMode ? 'var(--slate-5)' : activeIconColor} />
+                        {showResourcesFilterBadge && !isAgentResourcesPanelOpen && (
+                          <Box
+                            aria-hidden
+                            style={{
+                              position: 'absolute',
+                              top: -1,
+                              right: -1,
+                              width: 7,
+                              height: 7,
+                              borderRadius: '50%',
+                              backgroundColor: 'var(--red-9)',
+                              boxShadow: '0 0 0 1.5px var(--color-panel-solid)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                      </Box>
                     </IconButton>
                   </Tooltip>
                 ) : null}

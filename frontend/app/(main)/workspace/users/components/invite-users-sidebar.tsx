@@ -18,6 +18,7 @@ import { UsersApi } from '../api';
 import { GroupsApi } from '../../groups/api';
 import { USER_ROLES, INVITE_ROLE_OPTIONS } from '../../constants';
 import { GroupType, type Group } from '../../groups/types';
+import { useUserStore, selectIsAdmin } from '@/lib/store/user-store';
 
 // ========================================
 // Constants
@@ -65,6 +66,7 @@ export function InviteUsersSidebar({
 }) {
   const { t } = useTranslation();
   const addToast = useToastStore((s) => s.addToast);
+  const isAdmin = useUserStore(selectIsAdmin);
 
   const {
     isInvitePanelOpen,
@@ -97,9 +99,16 @@ export function InviteUsersSidebar({
     }
   }, [isInvitePanelOpen, resetInviteForm]);
 
-  // Fetch groups when panel opens
+  // Members can only invite as Member — lock the role whenever the panel opens.
   useEffect(() => {
-    if (!isInvitePanelOpen) return;
+    if (isInvitePanelOpen && !isAdmin) {
+      setInviteRole(USER_ROLES.MEMBER);
+    }
+  }, [isInvitePanelOpen, isAdmin, setInviteRole]);
+
+  // Fetch groups when panel opens (admin-only; groups APIs stay admin-gated)
+  useEffect(() => {
+    if (!isInvitePanelOpen || !isAdmin) return;
 
     let cancelled = false;
     const fetchGroups = async () => {
@@ -122,7 +131,7 @@ export function InviteUsersSidebar({
     return () => {
       cancelled = true;
     };
-  }, [isInvitePanelOpen]);
+  }, [isInvitePanelOpen, isAdmin]);
 
   // In edit mode, pre-populate group selections by matching names from the fetched list.
   // user.userGroups only carries { name, type } — no _id — so we resolve IDs here.
@@ -144,16 +153,16 @@ export function InviteUsersSidebar({
   // ^ Only re-run when groups load or edit mode changes. Do NOT add inviteGroupIds
   //   to deps or this will undo manual edits the user makes after opening.
 
-  // Form validation (role hidden — not required for now)
+  // Form validation
   const hasValidEmails = inviteEmails.some((tag) => tag.isValid !== false);
-  const isFormValid = hasValidEmails;
+  const isFormValid = hasValidEmails && Boolean(inviteRole);
 
   const adminGroupId = groups.find((g) => g.type === GroupType.ADMIN)?._id;
-  const isGrantingAdmin = Boolean(
-    adminGroupId && inviteGroupIds.includes(adminGroupId)
-  );
+  const isGrantingAdmin =
+    inviteRole === USER_ROLES.ADMIN ||
+    Boolean(adminGroupId && inviteGroupIds.includes(adminGroupId));
 
-  // Group options for dropdown
+  // Group options for dropdown (everyone already excluded when groups are fetched)
   const groupOptions: CheckboxOption[] = groups.map((g) => ({
     id: g._id,
     label: g.name.charAt(0).toUpperCase() + g.name.slice(1),
@@ -177,16 +186,11 @@ export function InviteUsersSidebar({
         const currentRole = editingInviteUser.role || USER_ROLES.MEMBER;
         const newRole = inviteRole || USER_ROLES.MEMBER;
 
-        // Find admin group from the fetched groups list
-        const adminGroup = groups.find((g) => g.type === GroupType.ADMIN);
-
-        // Update role if changed
-        if (adminGroup && newRole !== currentRole) {
-          if (newRole === USER_ROLES.ADMIN) {
-            await GroupsApi.addUsersToGroups([userId], [adminGroup._id]);
-          } else {
-            await GroupsApi.removeUsersFromGroups([userId], [adminGroup._id]);
-          }
+        // Update role if changed (stored on User.role, not admin group)
+        if (newRole !== currentRole) {
+          await UsersApi.updateUser(userId, {
+            role: newRole === USER_ROLES.ADMIN ? 'admin' : 'member',
+          });
         }
 
         // Update group memberships
@@ -225,7 +229,11 @@ export function InviteUsersSidebar({
         });
       } else {
         // ── Create mode: send new invite ──
-        await UsersApi.inviteUsers(validEmails, inviteGroupIds.length > 0 ? inviteGroupIds : undefined);
+        await UsersApi.inviteUsers(
+          validEmails,
+          inviteGroupIds.length > 0 ? inviteGroupIds : undefined,
+          isAdmin ? inviteRole || USER_ROLES.MEMBER : USER_ROLES.MEMBER,
+        );
 
         const emailDisplay =
           validEmails.length === 1
@@ -269,6 +277,7 @@ export function InviteUsersSidebar({
     onInviteSuccess,
     addToast,
     t,
+    isAdmin,
   ]);
 
   // Fills the email box for review rather than inviting straight away — nothing
@@ -559,21 +568,26 @@ export function InviteUsersSidebar({
           />
         </FormField>
 
-        {/* Role dropdown — hidden for now */}
-        {/* <FormField label={t('workspace.users.invite.roleLabel', 'Assign Role')}>
+        {/* Role dropdown */}
+        <FormField label={t('workspace.users.invite.roleLabel', 'Assign Role')}>
           <SelectDropdown
-            value={inviteRole}
+            value={isAdmin ? inviteRole : USER_ROLES.MEMBER}
             onChange={setInviteRole}
-            options={ROLE_OPTIONS}
+            options={
+              isAdmin
+                ? ROLE_OPTIONS
+                : ROLE_OPTIONS.filter((r) => r.value === USER_ROLES.MEMBER)
+            }
+            disabled={!isAdmin}
             placeholder={t(
               'workspace.users.invite.rolePlaceholder',
               'Assign team member role'
             )}
           />
-        </FormField> */}
+        </FormField>
 
-        {/* Groups dropdown */}
-        <FormField
+        {/* Groups dropdown — Enterprise Edition only */}
+        {/* <FormField
           label={t(
             'workspace.users.invite.groupLabel',
             'Add to a User Group'
@@ -609,7 +623,7 @@ export function InviteUsersSidebar({
               </Callout.Root>
             </Box>
           ) : null}
-        </FormField>
+        </FormField> */}
       </Box>
     </WorkspaceRightPanel>
   );

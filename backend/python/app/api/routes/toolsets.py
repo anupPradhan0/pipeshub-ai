@@ -17,7 +17,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -36,6 +36,8 @@ from app.connectors.core.base.token_service.oauth_service import (
 )
 from app.connectors.core.registry.auth_builder import OAuthScopeType
 from app.containers.connector import ConnectorAppContainer
+from app.services.featureflag.config.config import CONFIG
+from app.services.featureflag.platform_settings import read_platform_feature_flag
 from app.services.graph_db.interface.graph_db_provider import IGraphDBProvider
 from app.services.notification.types import (
     NotificationOrigin,
@@ -1910,6 +1912,43 @@ async def get_my_toolsets(
         toolset_type_filter=toolset_type,
     )
 
+async def is_actions_enabled(config_service: Optional[ConfigurationService] = None) -> bool:
+    """Deployment-level gate for Actions: agents may only load/use toolset
+    (connector) tools when this is true. Source of truth is the
+    ``ENABLE_ACTIONS`` platform feature flag. Defaults to ENABLED — unlike
+    ``ENABLE_MCP``, toolsets/actions are pre-existing functionality; admins
+    may opt out from Labs.
+
+    Resolution order (first hit wins), mirroring ``is_mcp_enabled``:
+    1. ``config_service`` — live read of the platform settings the Labs UI writes,
+       via the shared ``read_platform_feature_flag`` helper
+    2. ``FeatureFlagService`` — only reachable in services that wire an
+       ``EtcdProvider`` (the connectors service); the query service does not, which
+       is why the ``config_service`` read above is the primary path
+    3. Default: ``True``
+
+    Reads with ``use_cache=False`` (via ``read_platform_feature_flag``) so
+    flipping the flag in Labs takes effect on the next chat instead of after
+    a service restart.
+    """
+    if config_service is not None:
+        return await read_platform_feature_flag(
+            CONFIG.ENABLE_ACTIONS, config_service, default=True,
+        )
+
+    try:
+        from app.services.featureflag.featureflag import FeatureFlagService
+
+        return bool(
+            FeatureFlagService.get_service().is_feature_enabled(
+                CONFIG.ENABLE_ACTIONS, default=True
+            )
+        )
+    except Exception as e:
+        logger.warning(f"FeatureFlagService unavailable for ENABLE_ACTIONS, treating Actions as enabled: {e}")
+        return True
+
+
 async def get_authenticated_toolsets(
     user_id: str,
     org_id: str,
@@ -1977,7 +2016,8 @@ async def get_authenticated_toolsets(
 
         authenticated_toolsets.append({
             "instanceId": inst.get("_id"),
-            "name": inst.get("instanceName"),
+            "name": toolset_type,
+            "instanceName": inst.get("instanceName"),
             "toolsetType": toolset_type,
             "authType": inst.get("authType", "NONE"),
             "displayName": meta.get("display_name", toolset_type) if meta else toolset_type,
@@ -3066,28 +3106,34 @@ async def _resolve_agent_with_permission(
 async def _require_agent_edit_access(
     agent_key: str,
     request: Request,
+    feature_name: str = "toolsets",
+    settings_path: str = "Settings → Toolsets",
 ) -> dict:
     """
     Verify the caller has edit access to a service-account agent.
     Used by write endpoints (credential configure / OAuth) that require both
     ``can_edit`` rights and ``isServiceAccount`` on the agent.
     Returns the full agent document on success.
+
+    ``feature_name``/``settings_path`` only affect the error text — reused as-is
+    by ``app.api.routes.mcp_servers`` for MCP server agent-key credentials, which
+    need the identical ``can_edit`` + ``isServiceAccount`` guard.
     """
     agent = await _resolve_agent_with_permission(agent_key, request)
 
     if not agent.get("can_edit", False):
         raise HTTPException(
             status_code=HttpStatusCode.FORBIDDEN.value,
-            detail="You do not have permission to manage toolsets for this agent.",
+            detail=f"You do not have permission to manage {feature_name} for this agent.",
         )
 
     # Per-agent credentials only apply to service account agents.
-    # Regular agents use per-user credentials via Settings → Toolsets.
+    # Regular agents use per-user credentials via Settings.
     if not agent.get("isServiceAccount", False):
         raise HTTPException(
             status_code=HttpStatusCode.BAD_REQUEST.value,
-            detail="Per-agent toolset credentials only apply to service account agents. "
-                   "For regular agents, configure credentials in Settings → Toolsets.",
+            detail=f"Per-agent {feature_name} credentials only apply to service account agents. "
+                   f"For regular agents, configure credentials in {settings_path}.",
         )
     return agent
 

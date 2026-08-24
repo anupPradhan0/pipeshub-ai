@@ -70,6 +70,7 @@ from app.connectors.sources.microsoft.sharepoint_online.connector import (
 from app.connectors.sources.minio.connector import MinIOConnector
 from app.connectors.sources.nextcloud.connector import NextcloudConnector
 from app.connectors.sources.notion.connector import NotionConnector
+from app.connectors.sources.notion_personal.connector import NotionPersonalConnector
 from app.connectors.sources.rss.connector import RSSConnector
 from app.connectors.sources.s3.connector import S3Connector
 from app.connectors.sources.servicenow.servicenow.connector import ServiceNowConnector
@@ -83,6 +84,8 @@ from app.connectors.sources.slack.team.connector import SlackConnector
 
 from app.connectors.sources.gitlab.connector import GitLabConnector
 from app.connectors.sources.gitlab_personal.connector import GitLabPersonalConnector
+
+from app.connectors.sources.github_teams.connector import GitHubTeamsConnector
 
 from app.connectors.sources.snowflake.connector import SnowflakeConnector
 from app.connectors.sources.postgres.connector import PostgreSQLConnector
@@ -127,12 +130,14 @@ class ConnectorFactory:
         "postgresql": PostgreSQLConnector,
         "linear": LinearConnector,
         "notion": NotionConnector,
+        "notionpersonal": NotionPersonalConnector,
         "zammad": ZammadConnector,
         "zoom": ZoomConnector,
         "gong": GongConnector,
         "salesforce": SalesforceConnector,
         "gitlab": GitLabConnector,
         "gitlabpersonal": GitLabPersonalConnector,
+        "githubteams": GitHubTeamsConnector,
         "mariadb": MariaDBConnector,
         "slackworkspace": SlackConnector,
         "slack": SlackIndividualConnector,
@@ -278,6 +283,19 @@ class ConnectorFactory:
 
         return None
 
+    @staticmethod
+    async def _run_sync_and_invalidate(connector: BaseConnector, connector_id: str) -> None:
+        """Run a sync started outside `EventService`, then drop the connector's
+        cached accessible-record map the same way that path does."""
+        from app.services.cache.invalidation_hooks import notify_connector_sync_completed
+
+        try:
+            await connector.run_sync()
+        finally:
+            processor = getattr(connector, "data_entities_processor", None)
+            org_id = getattr(processor, "org_id", None) if processor is not None else None
+            await notify_connector_sync_completed(connector_id, org_id)
+
     @classmethod
     async def create_and_start_sync(
         cls,
@@ -314,7 +332,7 @@ class ConnectorFactory:
                     )
                 else:
                     await sync_task_manager.start_sync(
-                        connector_id, connector.run_sync()
+                        connector_id, cls._run_sync_and_invalidate(connector, connector_id)
                     )
                     logger.info(f"Started sync for {name} {connector_id} connector")
                 return connector

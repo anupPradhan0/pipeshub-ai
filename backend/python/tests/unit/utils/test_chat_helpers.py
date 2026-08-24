@@ -2192,6 +2192,28 @@ class TestCreateBlockFromMetadata:
         assert block["format"] == "txt"
         assert "data" in block
 
+    def test_image_block_wraps_data_as_dict_without_uri(self):
+        """Image points never carry the raw base64 URI in page_content (only a
+        text description or empty string), so there is no URI to recover here.
+        ``data`` must still be a dict (not a bare string) so downstream image
+        handling in _process_flattened_results can safely call .get("uri")
+        instead of raising AttributeError on a str."""
+        meta = {"blockType": "image", "blockNum": [1]}
+        block = create_block_from_metadata(meta, "A network diagram")
+
+        assert block["type"] == "image"
+        assert isinstance(block["data"], dict)
+        assert block["data"].get("uri") is None
+        assert block["data"].get("description") == "A network diagram"
+
+    def test_image_block_with_docx_extension_still_wraps_as_dict(self):
+        """The docx-specific page_content branch must not override image handling."""
+        meta = {"blockType": "image", "blockNum": [0], "extension": "docx"}
+        block = create_block_from_metadata(meta, "")
+
+        assert isinstance(block["data"], dict)
+        assert block["data"].get("uri") is None
+
 
 # ===================================================================
 # get_record (async)
@@ -3944,21 +3966,55 @@ class TestRecordToMessageContentDeeper:
         result = record_to_message_content(record)
         assert isinstance(result, list)
 
-    def test_other_block_type(self):
-        """Standalone non-handled block types are skipped (not emitted as text)."""
+    def test_top_level_code_block_is_rendered_with_its_symbol(self):
+        """A code block belongs to no group, so before it had its own branch it
+        fell to `else: continue` and a file with no classes reached the model
+        empty."""
+        record = {
+            "virtual_record_id": "vr-1",
+            "context_metadata": "Test",
+            "file_path": "src/app.py",
+            "block_containers": {
+                "blocks": [
+                    {"index": 0, "type": "code", "data": {"text": "print('hello')"},
+                     "parent_index": None,
+                     "code_metadata": {"qualified_name": "statements:L1"}},
+                ],
+                "block_groups": [],
+            },
+        }
+        text = _all_text(record_to_message_content(record))
+        assert "print('hello')" in text
+        assert "src/app.py#statements:L1" in text
+
+    def test_rendered_code_block_omits_the_bm25_subtokens(self):
         record = {
             "virtual_record_id": "vr-1",
             "context_metadata": "Test",
             "block_containers": {
                 "blocks": [
-                    {"index": 0, "type": "code", "data": "print('hello')", "parent_index": None},
+                    {"index": 0, "type": "code", "parent_index": None,
+                     "data": {"text": "def go(): pass", "subtokens": "go pass padding"}},
                 ],
                 "block_groups": [],
             },
         }
-        result = record_to_message_content(record)
-        text = _all_text(result)
-        assert "print('hello')" not in text
+        text = _all_text(record_to_message_content(record))
+        assert "def go(): pass" in text
+        assert "padding" not in text
+
+    def test_unhandled_block_type_is_still_skipped(self):
+        record = {
+            "virtual_record_id": "vr-1",
+            "context_metadata": "Test",
+            "block_containers": {
+                "blocks": [
+                    {"index": 0, "type": "divider", "data": "---", "parent_index": None},
+                ],
+                "block_groups": [],
+            },
+        }
+        assert "---" not in _all_text(record_to_message_content(record))
 
 
 # ===================================================================
@@ -5060,6 +5116,23 @@ class TestEnrichRecordsWithGraphContext:
         gp.get_parent_record_ids_by_relation_type = AsyncMock(side_effect=_parent)
         gp.get_child_record_ids_by_relation_type = AsyncMock(side_effect=_child)
 
+        async def _relations_batch(record_ids, relation_types, transaction=None):
+            return {
+                rid: {
+                    "parents": [
+                        {**e, "relationType": rt}
+                        for rt in relation_types for e in outgoing_by_type.get(rt, [])
+                    ],
+                    "children": [
+                        {**e, "relationType": rt}
+                        for rt in relation_types for e in incoming_by_type.get(rt, [])
+                    ],
+                }
+                for rid in record_ids
+            }
+
+        gp.get_record_relations_batch = AsyncMock(side_effect=_relations_batch)
+
         async def _get_document(record_id, collection=None, *args, **kwargs):
             if record_id in docs_by_id:
                 return docs_by_id[record_id]
@@ -5074,6 +5147,16 @@ class TestEnrichRecordsWithGraphContext:
             }
 
         gp.get_document = AsyncMock(side_effect=_get_document)
+
+        # The enrichment path resolves base and type-specific docs one query per
+        # collection rather than one per record. Delegate through the attribute
+        # so tests that override `get_document` after construction stay
+        # authoritative for both call shapes.
+        async def _get_nodes_by_field_in(collection, field_name, field_values, *args, **kwargs):
+            docs = [await gp.get_document(rid, collection) for rid in field_values]
+            return [d for d in docs if isinstance(d, dict) and (d.get("id") or d.get("_key"))]
+
+        gp.get_nodes_by_field_in = AsyncMock(side_effect=_get_nodes_by_field_in)
         gp.get_virtual_record_ids_for_record_ids = AsyncMock(return_value=vrid_map or {})
         return gp
 
@@ -5304,7 +5387,12 @@ class TestEnrichRecordsWithGraphContext:
         rel = flattened[0]["parent_node_relation"]
         assert rel["record_id"] == "rec-issue-1"
         assert "This ticket tracks the login bug fix." in rel["context_metadata"]
-        blob_store.get_record_from_storage.assert_awaited_once_with("vr-parent-1", "org-1")
+        # lookup_result is pre-resolved in one batched call by the caller; the
+        # fetch resolves the id itself only when the batch had no entry.
+        blob_store.get_record_from_storage.assert_awaited_once()
+        args, kwargs = blob_store.get_record_from_storage.await_args
+        assert args == ("vr-parent-1", "org-1")
+        assert set(kwargs) <= {"lookup_result"}
 
     @pytest.mark.asyncio
     async def test_falls_back_to_graph_when_not_indexed(self):
@@ -5405,15 +5493,19 @@ class TestEnrichRecordsWithGraphContext:
         assert "record_relations" not in rec
 
     @pytest.mark.asyncio
-    async def test_queries_both_relation_types(self):
+    async def test_queries_both_relation_types_in_one_batch(self):
         rec = self._ticket_record()
         vr_map = {"vr-ticket": rec}
         gp = self._make_graph_provider()
         await enrich_records_with_graph_context(
             vr_map, graph_provider=gp, flattened_results=[],
         )
-        assert gp.get_parent_record_ids_by_relation_type.await_count == 2
-        assert gp.get_child_record_ids_by_relation_type.await_count == 2
+        gp.get_record_relations_batch.assert_awaited_once()
+        from app.utils.chat_helpers import RECORD_RELATION_ENRICHMENT_TYPES
+        requested = set(gp.get_record_relations_batch.await_args.args[1])
+        assert requested == {rel.value for rel in RECORD_RELATION_ENRICHMENT_TYPES}
+        assert gp.get_parent_record_ids_by_relation_type.await_count == 0
+        assert gp.get_child_record_ids_by_relation_type.await_count == 0
 
     @pytest.mark.asyncio
     async def test_stores_minimal_related_records(self):
@@ -6535,3 +6627,77 @@ class TestRecordIdShortenerShortenIfKnown:
         s.shorten_if_known("rec-unknown")
         # Counter should still be 0 — no label minted
         assert s.get_or_create_short_id("rec-first") == "R1"
+
+
+class TestRenderBlocksWithImagesBudgetAccounting:
+    """Regression: an image the caller can deliver neither way (a tool result
+    with no `collected_images` sink joins text only) still consumed a slot of
+    the shared conversation-wide ImageBudget, starving a later image that
+    could have been delivered."""
+
+    _PNG = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def _image_item(self) -> dict:
+        return {
+            "block_index": 0,
+            "block_type": BlockType.IMAGE.value,
+            "content": self._PNG,
+            "citation_ref": "ref1",
+            "virtual_record_id": "vr-1",
+        }
+
+    def test_undeliverable_image_does_not_spend_budget(self):
+        from app.utils.chat_helpers import ImageBudget, _render_blocks_with_images
+
+        budget = ImageBudget(max_images=1)
+        content = _render_blocks_with_images(
+            [self._image_item()], True, budget,
+            collected_images=None, allow_inline_images=False,
+        )
+
+        assert budget.used == 0
+        assert all(item["type"] == "text" for item in content)
+        assert any("ref1" in item["text"] for item in content)
+
+    def test_sink_delivery_spends_budget_and_collects(self):
+        from app.utils.chat_helpers import ImageBudget, _render_blocks_with_images
+
+        budget = ImageBudget(max_images=1)
+        collected: list[dict[str, Any]] = []
+        content = _render_blocks_with_images(
+            [self._image_item()], True, budget,
+            collected_images=collected, allow_inline_images=False,
+        )
+
+        assert budget.used == 1
+        assert len(collected) == 1
+        assert collected[0]["image_url"]["url"] == self._PNG
+        assert all(item["type"] == "text" for item in content)
+
+    def test_inline_delivery_spends_budget_and_embeds(self):
+        from app.utils.chat_helpers import ImageBudget, _render_blocks_with_images
+
+        budget = ImageBudget(max_images=1)
+        content = _render_blocks_with_images(
+            [self._image_item()], True, budget,
+            collected_images=None, allow_inline_images=True,
+        )
+
+        assert budget.used == 1
+        assert any(item["type"] == "image_url" for item in content)
+
+    def test_exhausted_budget_says_so(self):
+        from app.utils.chat_helpers import ImageBudget, _render_blocks_with_images
+
+        budget = ImageBudget(max_images=1)
+        budget.try_consume(1)
+        content = _render_blocks_with_images(
+            [self._image_item()], True, budget,
+            collected_images=[], allow_inline_images=True,
+        )
+
+        assert budget.used == 1
+        assert any("conversation image limit" in item["text"] for item in content)

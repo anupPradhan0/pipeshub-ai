@@ -92,6 +92,22 @@ class EmbeddingProvider(Enum):
     VERTEX_AI = "vertexAI"
     VOYAGE = "voyage"
 
+LOCAL_CPU_EMBEDDING_PROVIDERS = frozenset({
+    EmbeddingProvider.DEFAULT.value,
+    EmbeddingProvider.HUGGING_FACE.value,
+    EmbeddingProvider.SENTENCE_TRANSFOMERS.value,
+})
+
+
+def is_local_cpu_embedding_provider(provider: str | None) -> bool:
+    """Whether *provider* embeds on local CPU via the embedding server.
+
+    ``None`` counts as local: an unconfigured deployment falls back to
+    ``get_default_embedding_model()``.
+    """
+    return provider is None or provider in LOCAL_CPU_EMBEDDING_PROVIDERS
+
+
 class LLMProvider(Enum):
     ANTHROPIC = "anthropic"
     AWS_BEDROCK = "bedrock"
@@ -217,6 +233,23 @@ def _set_embedding_dimensions_kwarg(
 ) -> None:
     if dimensions is not None:
         kwargs[key] = dimensions
+
+
+# `check_embedding_ctx_length=True` makes langchain-openai tiktoken-encode each
+# text and send `input` as arrays of token IDs. Only OpenAI's own embeddings
+# endpoint accepts that shape; every other server speaking the OpenAI protocol
+# (routers such as OpenRouter/Requesty, and providers proxied behind them —
+# Google, Cohere, Voyage, Nvidia, ...) requires plain strings and rejects token
+# arrays with a 400. tiktoken's vocabulary is OpenAI-specific anyway, so the
+# token IDs would be meaningless to a non-OpenAI model even where accepted.
+_TOKEN_ARRAY_EMBEDDING_HOSTS = frozenset({"api.openai.com"})
+
+
+def _accepts_token_array_embedding_input(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    host = urlparse(base_url).hostname
+    return bool(host) and host.lower() in _TOKEN_ARRAY_EMBEDDING_HOSTS
 
 
 def get_embedding_model(provider: str, config: dict[str, Any], model_name: str | None = None) -> Embeddings:
@@ -367,14 +400,11 @@ def get_embedding_model(provider: str, config: dict[str, Any], model_name: str |
         from langchain_openai.embeddings import OpenAIEmbeddings
 
         base_url = configuration['endpoint']
-        providers_to_skip_check = ("google", "cohere", "voyage")
-        check_embedding_ctx_length = not any(p in base_url for p in providers_to_skip_check)
-
         compat_kwargs: Dict[str, Any] = dict(
             model=model_name,
             api_key=configuration['apiKey'],
             base_url=base_url,
-            check_embedding_ctx_length=check_embedding_ctx_length,
+            check_embedding_ctx_length=_accepts_token_array_embedding_input(base_url),
         )
         _set_embedding_dimensions_kwarg(compat_kwargs, dimensions)
         return OpenAIEmbeddings(**compat_kwargs)
@@ -386,7 +416,7 @@ def get_embedding_model(provider: str, config: dict[str, Any], model_name: str |
             model=model_name,
             api_key=configuration['apiKey'],
             base_url=OPENROUTER_BASE_URL,
-            check_embedding_ctx_length=True,
+            check_embedding_ctx_length=_accepts_token_array_embedding_input(OPENROUTER_BASE_URL),
         )
         _set_embedding_dimensions_kwarg(or_emb_kwargs, dimensions)
         return OpenAIEmbeddings(**or_emb_kwargs)

@@ -3,7 +3,7 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any
 
-from app.config.constants.arangodb import ExtensionTypes
+from app.config.constants.arangodb import ExtensionTypes, PermissionModel
 from app.connectors.core.constants import AuthFieldKeys
 from app.connectors.core.registry.auth_builder import (
     AuthBuilder,
@@ -54,6 +54,7 @@ class ConnectorConfigBuilder:
             "hideConnector": False,
             "isAdminAccessRequired": False,
             "personalConnectorType": None,
+            "permissionModel": PermissionModel.RECORD_LEVEL.value,
             "auth": {
                 "supportedAuthTypes": ["OAUTH"],
                 "schemas": {},  # Per-auth-type schemas: {"OAUTH": {"fields": []}, "API_TOKEN": {"fields": []}}
@@ -107,6 +108,21 @@ class ConnectorConfigBuilder:
     def with_icon(self, icon_path: str) -> 'ConnectorConfigBuilder':
         """Set the icon path"""
         self.config["iconPath"] = icon_path
+        return self
+
+    def with_permission_model(self, model: PermissionModel) -> 'ConnectorConfigBuilder':
+        """Declare how this connector's records derive per-user visibility.
+
+        Set ``APP_LEVEL`` only when the source has no per-record ACLs, so every
+        record this connector syncs is visible to everyone who can reach the
+        connector app (these connectors write a single blanket ORG or
+        creator-USER permission per record). Leaving the ``RECORD_LEVEL``
+        default is always safe; declaring ``APP_LEVEL`` wrongly would widen
+        who can see the connector's records.
+        """
+        if not isinstance(model, PermissionModel):
+            raise ValueError(f"permission model must be a PermissionModel, got {type(model).__name__}")
+        self.config["permissionModel"] = model.value
         return self
 
     def with_realtime_support(self, supported: bool = True, connection_type: str = "WEBSOCKET") -> 'ConnectorConfigBuilder':
@@ -342,6 +358,8 @@ class ConnectorBuilder:
         self.connector_scopes: list[ConnectorScope] = []
         self._oauth_configs: dict[str, OAuthConfig] = {}  # Store OAuth configs for auto-registration
         self.connector_info: str | None = None
+        self.permission_model: PermissionModel | None = None
+        self.resilience_config: dict[str, Any] | None = None
 
     def in_group(self, app_group: str) -> 'ConnectorBuilder':
         """Set the app group"""
@@ -351,6 +369,18 @@ class ConnectorBuilder:
     def with_scopes(self, scopes: list[ConnectorScope]) -> 'ConnectorBuilder':
         """Set the connector scopes"""
         self.connector_scopes = scopes
+        return self
+
+    def with_permission_model(self, model: PermissionModel) -> 'ConnectorBuilder':
+        """Declare how this connector's records derive per-user visibility.
+
+        See `ConnectorConfigBuilder.with_permission_model`. Applied in
+        `build_decorator` so it holds regardless of where it sits in the chain
+        relative to `configure()`.
+        """
+        if not isinstance(model, PermissionModel):
+            raise ValueError(f"permission model must be a PermissionModel, got {type(model).__name__}")
+        self.permission_model = model
         return self
 
     def with_auth(self, auth_builders: list[AuthBuilder]) -> 'ConnectorBuilder':
@@ -421,6 +451,38 @@ class ConnectorBuilder:
         self.app_description = description
         return self
 
+    def with_resilience_config(
+        self,
+        *,
+        rate_limit: float,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
+        enabled: bool = True
+    ) -> 'ConnectorBuilder':
+        """Declare this connector's upstream rate limit and retry budget.
+
+        Read back via ``BaseConnector.resilience`` and handed to the connector's
+        HTTP client, which applies it below every request.
+
+        Args:
+            rate_limit: Sustained requests per second allowed by the upstream API.
+                Required — there is no sane default across providers, and one that
+                is wrong for a given API is worse than none.
+            max_retries: Retries after the first attempt, so ``3`` means 4 attempts.
+            base_delay: Starting point for exponential backoff, in seconds.
+            max_delay: Ceiling for any single wait, including ``Retry-After``.
+            enabled: Set False to keep the declared values but apply none of them.
+        """
+        self.resilience_config = {
+            'enabled': enabled,
+            'rate_limit': rate_limit,
+            'max_retries': max_retries,
+            'base_delay': base_delay,
+            'max_delay': max_delay,
+        }
+        return self
+
     def with_categories(self, categories: list[str]) -> 'ConnectorBuilder':
         """Set the app categories"""
         self.app_categories = categories
@@ -442,6 +504,9 @@ class ConnectorBuilder:
         from app.connectors.core.registry.connector_registry import Connector
 
         config = self.config_builder.build()
+
+        if self.permission_model is not None:
+            config["permissionModel"] = self.permission_model.value
 
         # Auto-register all OAuth configs with final connector name
         oauth_registry = get_oauth_config_registry()
@@ -502,7 +567,8 @@ class ConnectorBuilder:
             app_categories=self.app_categories,
             config=config,
             connector_scopes=self.connector_scopes,
-            connector_info=self.connector_info
+            connector_info=self.connector_info,
+            resilience_config=self.resilience_config
         )
 
     def _validate_required_auth_fields(self, config: dict[str, Any]) -> None:

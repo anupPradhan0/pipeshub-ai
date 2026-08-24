@@ -18,7 +18,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from logging import Logger
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import Request
 from app.config.configuration_service import ConfigurationService
@@ -30,9 +30,15 @@ from app.config.constants.arangodb import (
     Connectors,
     DepartmentNames,
     OriginTypes,
+    PermissionModel,
     ProgressStatus,
     RecordTypes,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
+    from app.services.cache.accessible_records_cache import AccessibleRecordsCache
 from app.config.constants.neo4j import (
     COLLECTION_TO_LABEL,
     EDGE_COLLECTION_TO_RELATIONSHIP,
@@ -95,6 +101,7 @@ class Neo4jProvider(IGraphDBProvider):
         self,
         logger: Logger,
         config_service: ConfigurationService,
+        accessible_records_cache: "AccessibleRecordsCache | None" = None,
     ) -> None:
         """
         Initialize Neo4j provider.
@@ -102,11 +109,14 @@ class Neo4jProvider(IGraphDBProvider):
         Args:
             logger: Logger instance
             config_service: Configuration service for database credentials
+            accessible_records_cache: Optional cache for accessible-record maps.
+                Only the query service passes one; without it every read is live.
         """
         self.logger = logger
         self.config_service = config_service
         self.client: Neo4jClient | None = None
         self.validator = NodeSchemaValidator()
+        self.accessible_records_cache = accessible_records_cache
 
     # ==================== Connection Management ====================
 
@@ -4635,6 +4645,173 @@ class Neo4jProvider(IGraphDBProvider):
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
 
+    async def _get_accessible_kb_ids(self, user_id: str) -> list[str]:
+        """KB App ids this user can reach, directly or through a team.
+
+        Mirrors the access paths `_get_kb_virtual_ids` resolves inline, so that
+        the per-KB record maps can be cached org-wide while *which* KBs a user
+        may see stays a live check. Raises on failure so callers can fall back
+        to the uncached path rather than silently narrowing the result.
+        """
+        query = """
+        MATCH (userDoc:User {userId: $userId})
+
+        CALL {
+            WITH userDoc
+            OPTIONAL MATCH (userDoc)-[:PERMISSION]->(kb:App {type: "KB"})
+            RETURN collect(DISTINCT kb.id) AS directIds
+        }
+
+        CALL {
+            WITH userDoc
+            OPTIONAL MATCH (userDoc)-[ute:PERMISSION]->(team:Teams)
+            WHERE ute.type = "USER"
+            OPTIONAL MATCH (team)-[tke:PERMISSION]->(kb:App {type: "KB"})
+            WHERE tke.type = "TEAM"
+            RETURN collect(DISTINCT kb.id) AS teamIds
+        }
+
+        WITH directIds + teamIds AS ids
+        UNWIND ids AS kbId
+        WITH kbId WHERE kbId IS NOT NULL
+        RETURN DISTINCT kbId AS kbId
+        """
+        results = await self.client.execute_query(query, parameters={"userId": user_id})
+        return [r.get("kbId") for r in results if r.get("kbId")]
+
+    async def _get_kb_virtual_ids_for_kb(self, kb_id: str) -> dict[str, str]:
+        """Every completed upload in one KB, independent of user.
+
+        Same record predicates as `_get_kb_virtual_ids` — a record only becomes
+        searchable once indexing completes, and KB records are uploads.
+        """
+        query = """
+        MATCH (r:Record)-[:BELONGS_TO]->(kb:App {id: $kbId, type: "KB"})
+        WHERE r.indexingStatus = $completedStatus
+          AND r.origin = $uploadOrigin
+          AND r.virtualRecordId IS NOT NULL
+          AND r.id IS NOT NULL
+        RETURN DISTINCT r.virtualRecordId AS virtualId, r.id AS recordId
+        """
+        results = await self.client.execute_query(
+            query,
+            parameters={
+                "kbId": kb_id,
+                "completedStatus": ProgressStatus.COMPLETED.value,
+                "uploadOrigin": OriginTypes.UPLOAD.value,
+            },
+        )
+
+        virtual_id_to_record_id: dict[str, str] = {}
+        for r in results:
+            vid = r.get("virtualId")
+            rid = r.get("recordId")
+            if vid and rid and vid not in virtual_id_to_record_id:
+                virtual_id_to_record_id[vid] = rid
+        return virtual_id_to_record_id
+
+    async def _get_all_virtual_ids_for_connector(self, connector_id: str) -> dict[str, str]:
+        """Every completed record of an app-level-permission connector.
+
+        These connectors have no per-record ACLs — reaching the connector means
+        reaching its records — so this supersets the per-user 8-path traversal
+        (including its "Anyone" branch) with a single scan. Only valid for
+        connectors declaring `PermissionModel.APP_LEVEL`.
+        """
+        query = """
+        MATCH (r:Record {connectorId: $connectorId})
+        WHERE r.indexingStatus = $completedStatus
+          AND r.virtualRecordId IS NOT NULL
+          AND r.id IS NOT NULL
+        RETURN DISTINCT r.virtualRecordId AS virtualId, r.id AS recordId
+        """
+        results = await self.client.execute_query(
+            query,
+            parameters={
+                "connectorId": connector_id,
+                "completedStatus": ProgressStatus.COMPLETED.value,
+            },
+        )
+
+        virtual_id_to_record_id: dict[str, str] = {}
+        for r in results:
+            vid = r.get("virtualId")
+            rid = r.get("recordId")
+            if vid and rid and vid not in virtual_id_to_record_id:
+                virtual_id_to_record_id[vid] = rid
+        return virtual_id_to_record_id
+
+    async def _get_connector_virtual_ids_cached(
+        self, user_id: str, org_id: str, connector_id: str, permission_model: str | None
+    ) -> dict[str, str]:
+        """One connector's map, through the cache appropriate to its ACL model.
+
+        Only valid for an unfiltered request: the cached maps carry no metadata
+        filter or time range, so the caller must have ruled both out.
+        """
+        try:
+            if permission_model == PermissionModel.APP_LEVEL.value:
+                return await self.accessible_records_cache.get_or_compute_app_connector(
+                    org_id,
+                    connector_id,
+                    lambda: self._get_all_virtual_ids_for_connector(connector_id),
+                )
+            return await self.accessible_records_cache.get_or_compute_user_connector(
+                org_id,
+                connector_id,
+                user_id,
+                lambda: self._get_virtual_ids_for_connector(user_id, org_id, connector_id, None),
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Cached connector lookup failed for {connector_id}, using live query: {str(e)}"
+            )
+            return await self._get_virtual_ids_for_connector(user_id, org_id, connector_id, None)
+
+    async def _get_kb_virtual_ids_cached(
+        self, user_id: str, org_id: str, kb_ids: list[str] | None
+    ) -> dict[str, str]:
+        """KB half of the accessible map: live access check, cached contents.
+
+        Only valid for an unfiltered request — the cached per-KB maps carry no
+        metadata filter or time range, so the caller must have ruled both out.
+
+        Falls back to the single uncached query on any failure, so a cache or
+        permission-query problem degrades to today's behaviour instead of
+        narrowing what the user can search.
+        """
+        try:
+            accessible = await self._get_accessible_kb_ids(user_id)
+            accessible_set = set(accessible)
+            targets = [kb for kb in kb_ids if kb in accessible_set] if kb_ids else accessible
+
+            if not targets:
+                return {}
+
+            maps = await asyncio.gather(
+                *[
+                    self.accessible_records_cache.get_or_compute_kb(
+                        org_id, kb_id, lambda kb_id=kb_id: self._get_kb_virtual_ids_for_kb(kb_id)
+                    )
+                    for kb_id in targets
+                ],
+                return_exceptions=True,
+            )
+
+            # Iterated in `targets` order so the merge stays first-seen-wins,
+            # matching what the single uncached query returns.
+            merged: dict[str, str] = {}
+            for result in maps:
+                if isinstance(result, Exception):
+                    raise result
+                for vid, rid in result.items():
+                    if vid not in merged:
+                        merged[vid] = rid
+            return merged
+        except Exception as e:
+            self.logger.warning(f"Cached KB lookup failed, using live query: {str(e)}")
+            return await self._get_kb_virtual_ids(user_id, org_id, kb_ids, None)
+
     async def get_accessible_virtual_record_ids(
         self,
         user_id: str,
@@ -4687,6 +4864,7 @@ class Neo4jProvider(IGraphDBProvider):
             # Build ID list and type map to distinguish KB apps from regular connectors
             user_apps_ids = []
             app_type_map: dict[str, str] = {}
+            app_permission_map: dict[str, str | None] = {}
             for app_doc in user_app_docs:
                 if not app_doc:
                     continue
@@ -4695,6 +4873,7 @@ class Neo4jProvider(IGraphDBProvider):
                     continue
                 user_apps_ids.append(app_id)
                 app_type_map[app_id] = app_doc.get('type', '')
+                app_permission_map[app_id] = app_doc.get('permissionModel')
 
             # Separate KB app IDs from regular connector IDs
             kb_app_ids_set = {aid for aid, atype in app_type_map.items() if atype == Connectors.KNOWLEDGE_BASE.value}
@@ -4724,6 +4903,35 @@ class Neo4jProvider(IGraphDBProvider):
                 f"Metadata filters: {list(metadata_filters.keys())}"
             )
 
+            # Metadata filters change what each query returns, so they bypass the
+            # cache entirely rather than needing them in every cache key.
+            # Metadata filters and a time range both narrow what each query
+            # returns, and neither is part of the cache key, so a filtered
+            # request must go to the live path rather than read a map built for
+            # the unfiltered one.
+            use_cache = (
+                self.accessible_records_cache is not None
+                and self.accessible_records_cache.enabled
+                and not metadata_filters
+                and not time_range
+            )
+
+            def connector_task(connector_id: str) -> "Awaitable[dict[str, str]]":
+                if use_cache:
+                    return self._get_connector_virtual_ids_cached(
+                        user_id, org_id, connector_id, app_permission_map.get(connector_id)
+                    )
+                return self._get_virtual_ids_for_connector(
+                    user_id, org_id, connector_id, metadata_filters, time_range=time_range
+                )
+
+            def kb_task(kb_filter: list[str] | None) -> "Awaitable[dict[str, str]]":
+                if use_cache:
+                    return self._get_kb_virtual_ids_cached(user_id, org_id, kb_filter)
+                return self._get_kb_virtual_ids(
+                    user_id, org_id, kb_filter, metadata_filters, time_range=time_range
+                )
+
             # Step 3: Determine tasks based on 4 scenarios
             tasks = []
 
@@ -4738,16 +4946,11 @@ class Neo4jProvider(IGraphDBProvider):
                 ]
                 self.logger.debug(f"Querying {len(connectors_to_query)} filtered connectors")
 
-                for connector_id in connectors_to_query:
-                    tasks.append(self._get_virtual_ids_for_connector(
-                        user_id, org_id, connector_id, metadata_filters, time_range=time_range
-                    ))
+                tasks.extend(connector_task(cid) for cid in connectors_to_query)
 
                 # Query only filtered KBs
                 self.logger.debug(f"Querying {len(kb_ids)} filtered KBs")
-                tasks.append(self._get_kb_virtual_ids(
-                    user_id, org_id, kb_ids, metadata_filters, time_range=time_range
-                ))
+                tasks.append(kb_task(kb_ids))
 
             # Scenario 2: C=false, KB=true (only KB filter)
             elif not has_app_filter and has_kb_filter:
@@ -4755,9 +4958,7 @@ class Neo4jProvider(IGraphDBProvider):
 
                 # Query only filtered KBs (skip connector queries)
                 self.logger.debug(f"Querying {len(kb_ids)} filtered KBs only")
-                tasks.append(self._get_kb_virtual_ids(
-                    user_id, org_id, kb_ids, metadata_filters, time_range=time_range
-                ))
+                tasks.append(kb_task(kb_ids))
 
             # Scenario 3: C=false, KB=false (no filters)
             elif not has_app_filter and not has_kb_filter:
@@ -4765,16 +4966,11 @@ class Neo4jProvider(IGraphDBProvider):
 
                 # Query all regular connector apps
                 self.logger.debug(f"Querying all {len(connector_app_ids_set)} accessible connectors")
-                for connector_id in connector_app_ids_set:
-                    tasks.append(self._get_virtual_ids_for_connector(
-                        user_id, org_id, connector_id, metadata_filters, time_range=time_range
-                    ))
+                tasks.extend(connector_task(cid) for cid in connector_app_ids_set)
 
                 # Query all KBs
                 self.logger.debug("Querying all KBs")
-                tasks.append(self._get_kb_virtual_ids(
-                    user_id, org_id, None, metadata_filters, time_range=time_range
-                ))
+                tasks.append(kb_task(None))
 
             # Scenario 4: C=true, KB=false (only connector filter)
             else:  # has_app_filter and not has_kb_filter
@@ -4788,10 +4984,7 @@ class Neo4jProvider(IGraphDBProvider):
                 ]
                 self.logger.debug(f"Querying {len(connectors_to_query)} filtered connectors only")
 
-                for connector_id in connectors_to_query:
-                    tasks.append(self._get_virtual_ids_for_connector(
-                        user_id, org_id, connector_id, metadata_filters, time_range=time_range
-                    ))
+                tasks.extend(connector_task(cid) for cid in connectors_to_query)
 
             # Step 5: Execute all tasks in parallel
             if not tasks:
@@ -5152,6 +5345,70 @@ class Neo4jProvider(IGraphDBProvider):
                 record_id, str(e),
             )
             return []
+
+    async def get_record_relations_batch(
+        self,
+        record_ids: list[str],
+        relation_types: list[str],
+        transaction: Optional[str] = None,
+    ) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        """Both edge directions for every record, in one query.
+
+        The per-record methods cost one query each per relation type per
+        direction; a turn enriching 30 hits over 2 relation types spent 120
+        round trips here.
+        """
+        out: dict[str, dict[str, list[dict[str, Any]]]] = {
+            record_id: {"parents": [], "children": []} for record_id in record_ids
+        }
+        if not record_ids or not relation_types:
+            return out
+        try:
+            query = """
+            MATCH (a:Record)-[r:RECORD_RELATION]-(b:Record)
+            WHERE a.id IN $record_ids AND r.relationshipType IN $relation_types
+            RETURN a.id AS anchor_id,
+                   b.id AS record_id,
+                   startNode(r).id = a.id AS outgoing,
+                   r.relationshipType AS relationType,
+                   COALESCE(r.parentTableName, '') AS parentTable,
+                   COALESCE(r.childTableName, '') AS childTable,
+                   COALESCE(r.sourceColumn, '') AS sourceColumn,
+                   COALESCE(r.targetColumn, '') AS targetColumn
+            """
+            results = await self.client.execute_query(
+                query,
+                parameters={"record_ids": record_ids, "relation_types": relation_types},
+                txn_id=transaction,
+            )
+            for record in results:
+                anchor = record.get("anchor_id")
+                bucket = out.get(anchor)
+                if bucket is None:
+                    continue
+                # Outgoing means the anchor is the edge's start node, matching
+                # get_parent_record_ids_by_relation_type's direction.
+                outgoing = bool(record.get("outgoing"))
+                edge = {
+                    "record_id": record.get("record_id"),
+                    "relationType": record.get("relationType"),
+                    "sourceColumn": record.get("sourceColumn", ""),
+                    "targetColumn": record.get("targetColumn", ""),
+                }
+                if outgoing:
+                    edge["parentTable"] = record.get("parentTable", "")
+                    bucket["parents"].append(edge)
+                else:
+                    edge["childTable"] = record.get("childTable", "")
+                    bucket["children"].append(edge)
+            return out
+        except Exception as e:
+            self.logger.warning(
+                "Failed to batch record relations for %d records: %s", len(record_ids), str(e),
+            )
+            return await super().get_record_relations_batch(
+                record_ids, relation_types, transaction,
+            )
 
     async def batch_upsert_record_groups(
         self,
@@ -6352,7 +6609,12 @@ class Neo4jProvider(IGraphDBProvider):
                 "success": True,
                 "record_id": record_id,
                 "message": "Record deleted successfully",
-                "eventData": event_data
+                "eventData": event_data,
+                # Lets the caller invalidate the right cache entry without
+                # re-reading the record it just deleted.
+                "connectorId": record.get("connectorId"),
+                "orgId": record.get("orgId"),
+                "isKb": is_kb_record,
             }
 
         except Exception as e:
@@ -6542,9 +6804,9 @@ class Neo4jProvider(IGraphDBProvider):
         query = """
         MATCH (record:Record {connectorId: $connector_id})-[:IS_OF_TYPE]->(typeNode)
         WITH DISTINCT typeNode, labels(typeNode) AS nodeLabels
-        WHERE any(label IN nodeLabels WHERE label IN ['File', 'Mail', 'Webpage', 'Comment', 'Ticket', 'Link', 'Project', 'Meeting'])
+        WHERE any(label IN nodeLabels WHERE label IN ['File', 'Mail', 'Webpage', 'Comment', 'Ticket', 'Link', 'Project', 'Meeting', 'Codefiles', 'Prs', 'Message', 'Artifact', 'Deals', 'Products'])
         RETURN {
-          collection: head([label IN nodeLabels WHERE label IN ['File', 'Mail', 'Webpage', 'Comment', 'Ticket', 'Link', 'Project', 'Meeting']]),
+          collection: head([label IN nodeLabels WHERE label IN ['File', 'Mail', 'Webpage', 'Comment', 'Ticket', 'Link', 'Project', 'Meeting', 'Codefiles', 'Prs', 'Message', 'Artifact', 'Deals', 'Products']]),
           key: typeNode.id,
           full_id: typeNode.id
         } AS target
@@ -9840,6 +10102,112 @@ class Neo4jProvider(IGraphDBProvider):
             self.logger.error(f"❌ Failed to delete records recursively: {str(e)}")
             return {"success": False, "reason": str(e), "code": 500, "eventData": None}
 
+    async def delete_single_record(
+        self,
+        record_id: str,
+        transaction: str | None = None,
+    ) -> dict:
+        """Same cleanup as ``delete_records_recursive`` for one record — no walk."""
+        try:
+            if not record_id:
+                return {
+                    "success": True, "deleted_records": [], "failed_records": [],
+                    "total_requested": 0, "successfully_deleted": 0, "failed_count": 0,
+                    "eventData": None,
+                }
+            node_collections = [CollectionNames.RECORDS.value] + list(set(RECORD_TYPE_COLLECTION_MAPPING.values()))
+            txn_id = transaction
+            if transaction is None:
+                txn_id = await self.begin_transaction(
+                    read=[],
+                    write=node_collections + [
+                        CollectionNames.RECORD_RELATIONS.value,
+                        CollectionNames.IS_OF_TYPE.value,
+                        CollectionNames.BELONGS_TO.value,
+                        CollectionNames.PERMISSION.value,
+                        CollectionNames.INHERIT_PERMISSIONS.value,
+                    ],
+                )
+            try:
+                inventory_query = """
+                UNWIND $record_ids AS rid
+                OPTIONAL MATCH (rec:Record {id: rid})
+                WITH collect(DISTINCT CASE
+                        WHEN rec IS NOT NULL AND (rec.isDeleted IS NULL OR rec.isDeleted <> true)
+                        THEN rec ELSE null END) AS roots_raw
+                WITH [r IN roots_raw WHERE r IS NOT NULL] AS valid_roots
+                WITH valid_roots, [r IN valid_roots | r.id] AS valid_root_keys
+                UNWIND (CASE WHEN size(valid_roots) = 0 THEN [null] ELSE valid_roots END) AS vert
+                OPTIONAL MATCH (vert)-[:IS_OF_TYPE]->(t)
+                WITH valid_root_keys,
+                     collect(DISTINCT CASE WHEN vert IS NOT NULL THEN {record: vert, type_doc: t} ELSE null END) AS rwt_raw
+                RETURN {
+                    valid_root_keys: valid_root_keys,
+                    records_with_type: [x IN rwt_raw WHERE x IS NOT NULL]
+                } AS inventory
+                """
+                inv_results = await self.client.execute_query(
+                    inventory_query,
+                    parameters={"record_ids": [record_id]},
+                    txn_id=txn_id,
+                )
+                inventory = inv_results[0]["inventory"] if inv_results else {}
+                valid_root_keys = inventory.get("valid_root_keys", [])
+                records_with_type = inventory.get("records_with_type", [])
+                record_keys = [rt["record"]["id"] for rt in records_with_type if rt.get("record")]
+
+                if record_keys:
+                    await self.client.execute_query(
+                        "MATCH (r:Record)-[:IS_OF_TYPE]->(t) WHERE r.id IN $record_ids DETACH DELETE t",
+                        parameters={"record_ids": record_keys}, txn_id=txn_id,
+                    )
+                    await self.client.execute_query(
+                        "MATCH (r:Record) WHERE r.id IN $record_ids DETACH DELETE r",
+                        parameters={"record_ids": record_keys}, txn_id=txn_id,
+                    )
+                if transaction is None and txn_id:
+                    await self.commit_transaction(txn_id)
+
+                event_payloads = []
+                try:
+                    for rt in records_with_type:
+                        rec = rt.get("record") or {}
+                        if not rec.get("virtualRecordId"):
+                            continue
+                        type_doc = rt.get("type_doc") or {}
+                        delete_payload = await self._create_deleted_record_event_payload(rec, type_doc)
+                        if delete_payload:
+                            delete_payload["connectorName"] = rec.get("connectorName")
+                            delete_payload["origin"] = rec.get("origin")
+                            event_payloads.append(delete_payload)
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to prepare deletion event payloads: {str(e)}")
+                event_data = {
+                    "eventType": "deleteRecord",
+                    "topic": "record-events",
+                    "payloads": event_payloads,
+                } if event_payloads else None
+
+                deleted_records = [
+                    {"record_id": rt["record"]["id"], "name": rt["record"].get("recordName", "Unknown")}
+                    for rt in records_with_type if rt.get("record")
+                ]
+                return {
+                    "success": True,
+                    "deleted_records": deleted_records,
+                    "failed_records": [],
+                    "total_requested": 1,
+                    "successfully_deleted": len(valid_root_keys),
+                    "failed_count": 0,
+                    "eventData": event_data,
+                }
+            except Exception as db_error:
+                if transaction is None and txn_id:
+                    await self.rollback_transaction(txn_id)
+                raise db_error
+        except Exception as e:
+            self.logger.error(f"❌ Failed to delete single record: {str(e)}")
+            return {"success": False, "reason": str(e), "code": 500, "eventData": None}
 
     async def find_folder_by_name_in_parent(
         self,
@@ -14183,6 +14551,7 @@ class Neo4jProvider(IGraphDBProvider):
                 recordType: record.recordType,
                 recordGroupType: null,
                 indexingStatus: record.indexingStatus,
+                reason: record.reason,
                 createdAt: coalesce(record.createdAtTimestamp, 0),
                 updatedAt: coalesce(record.updatedAtTimestamp, 0),
                 sizeInBytes: coalesce(record.sizeInBytes, file_info.fileSizeInBytes),
@@ -16878,6 +17247,59 @@ class Neo4jProvider(IGraphDBProvider):
 
         return result_map
 
+    async def _project_agents_mcp_servers(
+        self, agent_ids: list[str], transaction: str | None = None
+    ) -> dict[str, list[dict]]:
+        """Build the MCP servers + tools graph projection for many agents at once.
+
+        Mirrors the toolsets query in ``_project_agents_toolsets_and_knowledge`` exactly
+        (agentHasMcpServer -> mcpServerHasTool); kept as a separate helper since MCP server
+        nodes carry no secrets and the tool nodes point at nothing else (no knowledge join
+        needed here).
+        """
+        result_map: dict[str, list[dict]] = {agent_id: [] for agent_id in agent_ids}
+        if not agent_ids:
+            return result_map
+
+        agent_label = collection_to_label(CollectionNames.AGENT_INSTANCES.value)
+        agent_has_mcp_server_rel = edge_collection_to_relationship(CollectionNames.AGENT_HAS_MCP_SERVER.value)
+        mcp_server_has_tool_rel = edge_collection_to_relationship(CollectionNames.MCP_SERVER_HAS_TOOL.value)
+        mcp_server_label = collection_to_label(CollectionNames.AGENT_MCP_SERVERS.value)
+        tool_label = collection_to_label(CollectionNames.AGENT_TOOLS.value)
+
+        mcp_servers_query = f"""
+        MATCH (agent:{agent_label})-[r:{agent_has_mcp_server_rel}]->(ms:{mcp_server_label})
+        WHERE agent.id IN $agent_ids
+        OPTIONAL MATCH (ms)-[tr:{mcp_server_has_tool_rel}]->(tool:{tool_label})
+        WITH agent, ms, collect(DISTINCT CASE
+            WHEN tool IS NOT NULL THEN {{
+                _key: tool.id,
+                name: tool.name,
+                fullName: tool.fullName,
+                description: tool.description
+            }}
+            ELSE null
+        END) AS tools_raw
+        WITH agent, ms, [t IN tools_raw WHERE t IS NOT NULL] AS tools
+        RETURN agent.id AS agent_id, {{
+            _key: ms.id,
+            name: ms.name,
+            displayName: ms.displayName,
+            typeId: ms.typeId,
+            instanceId: ms.instanceId,
+            tools: tools
+        }} AS mcp_server
+        """
+        mcp_servers_result = await self.client.execute_query(
+            mcp_servers_query, parameters={"agent_ids": agent_ids}, txn_id=transaction
+        )
+        for row in mcp_servers_result or []:
+            agent_id = row["agent_id"]
+            if agent_id in result_map:
+                result_map[agent_id].append(row["mcp_server"])
+
+        return result_map
+
     async def _project_agent_skills(
         self, agent_id: str, transaction: str | None = None
     ) -> list[dict]:
@@ -16958,6 +17380,15 @@ class Neo4jProvider(IGraphDBProvider):
             agent["toolsets"] = agent_projection["toolsets"]
             agent["knowledge"] = agent_projection["knowledge"]
             agent["skills"] = await self._project_agent_skills(agent_id, transaction)
+            try:
+                mcp_projection = await self._project_agents_mcp_servers([agent_id], transaction)
+            except Exception as e:
+                # Mirrors get_all_agents._enrich: an MCP-projection failure must not make
+                # this single-agent lookup indistinguishable from "not found" via the
+                # outer except below — degrade to an empty list instead.
+                self.logger.warning(f"Agent MCP server enrichment failed for {agent_id}; returning agent without mcpServers: {str(e)}")
+                mcp_projection = {}
+            agent["mcpServers"] = mcp_projection.get(agent_id, [])
 
             # shareWithOrg: when org_id is provided match the specific org node;
             # when org_id is absent check whether any Orgs label node has a
@@ -17425,10 +17856,16 @@ class Neo4jProvider(IGraphDBProvider):
                     # error. Degrade to the consistent empty-array shape instead.
                     self.logger.warning(f"Agent list enrichment failed; returning agents without toolsets/knowledge: {str(e)}")
                     projection = {}
+                try:
+                    mcp_projection = await self._project_agents_mcp_servers(ids, transaction)
+                except Exception as e:
+                    self.logger.warning(f"Agent list MCP server enrichment failed; returning agents without mcpServers: {str(e)}")
+                    mcp_projection = {}
                 for ag in agent_list:
                     proj = projection.get(ag.get("_key"), {"toolsets": [], "knowledge": []})
                     ag["toolsets"] = proj["toolsets"]
                     ag["knowledge"] = proj["knowledge"]
+                    ag["mcpServers"] = mcp_projection.get(ag.get("_key"), [])
                 return agent_list
 
             has_paging = page is not None and limit is not None

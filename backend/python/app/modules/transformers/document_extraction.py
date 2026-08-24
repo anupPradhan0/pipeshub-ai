@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import logging
 from typing import List, Literal, Optional
 
@@ -251,6 +252,21 @@ class DocumentExtraction(Transformer):
                     content.append(candidate)
                     total_tokens += increment
 
+            elif block.type.value == "code":
+                if block.data:
+                    code_text = block.data.get("text", "") if isinstance(block.data, dict) else str(block.data)
+                    if code_text:
+                        candidate = {
+                            "type": "text",
+                            "text": code_text,
+                        }
+                        increment = count_tokens(code_text)
+                        if total_tokens + increment > MAX_TOKENS:
+                            self.logger.info("✂️ Content exceeds %d tokens (%d). Truncating to head.", MAX_TOKENS, total_tokens + increment)
+                            break
+                        content.append(candidate)
+                        total_tokens += increment
+
         return content
 
     async def classify(
@@ -267,7 +283,7 @@ class DocumentExtraction(Transformer):
         rather than making a graph call.
         """
         self.logger.info("🎯 Extracting domain metadata (pre-fetched departments)")
-        self.llm, config = await get_llm_for_role(self.config_service, "indexing")
+        self.llm, config = await get_llm_for_role(self.config_service, "indexing", reasoning_effort="low")
         is_multimodal_llm = config.get("isMultimodal")
         context_length = config.get("contextLength") or DEFAULT_CONTEXT_LENGTH
         self.logger.info(f"Context length: {context_length}")
@@ -312,7 +328,7 @@ class DocumentExtraction(Transformer):
         Extract metadata from document content.
         """
         self.logger.info("🎯 Extracting domain metadata")
-        self.llm, config = await get_llm_for_role(self.config_service, "indexing")
+        self.llm, config = await get_llm_for_role(self.config_service, "indexing", reasoning_effort="low")
         is_multimodal_llm = config.get("isMultimodal")
         context_length = config.get("contextLength") or DEFAULT_CONTEXT_LENGTH
 

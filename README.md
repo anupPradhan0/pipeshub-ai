@@ -182,6 +182,25 @@ Use PipesHub with any MCP-compatible client to bring your enterprise context int
 
 **Repository:** [pipeshub-ai/mcp-server](https://github.com/pipeshub-ai/mcp-server/)
 
+### Connecting an Omnigent agent
+
+First, mint a long-lived credential: **workspace → Developer settings →
+Personal Access Tokens → New token**. Pick an expiry (30/90/365 days, or
+never) — this runs as *you*, so results respect your own per-user
+permissions, unlike an OAuth app's client-credentials flow.
+
+Three ways to connect, from least to most setup:
+
+1. **Attach in the Omnigent web UI (fastest, no clone).** Open a session's
+   info panel → Manage MCP Servers → add PipesHub's URL and an
+   `Authorization: Bearer <token>` header → restart the session.
+2. **Run the packaged example agent.** A ready-made agent bundle (tuned
+   prompt + instructions) ships with Omnigent:
+   `PIPESHUB_MCP_URL=... PIPESHUB_MCP_TOKEN=... omnigent run examples/pipeshub/`.
+3. **Use the connect kit** in [`integrations/omnigent/`](integrations/omnigent/)
+   (`setup.sh` / `run.sh`) for CI, service accounts, or password/OAuth
+   client-credentials auth instead of a personal token.
+
 ## SDKs
 
 PipesHub provides developer SDKs for Python, TypeScript, and Go to help you integrate quickly. Check the respective SDK repository README for setup and usage details.
@@ -222,6 +241,7 @@ Want to join our community of developers? Please check out our [Contributing Gui
 <tr><td>Report a bug or request a feature</td><td><a href="https://github.com/pipeshub-ai/pipeshub-ai/issues">GitHub Issues</a></td></tr>
 <tr><td>Report a security issue</td><td><a href="https://github.com/pipeshub-ai/pipeshub-ai/blob/main/SECURITY.md">Report Security Issue</a></td></tr>
 <tr><td>Read the docs</td><td><a href="https://docs.pipeshub.com/">Pipeshub Docs</a></td></tr>
+<tr><td>See what changed in each release</td><td><a href="https://github.com/pipeshub-ai/pipeshub-ai/blob/main/CHANGELOG.md">Changelog</a></td></tr>
 </tbody>
 </table>
 
