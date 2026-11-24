@@ -73,6 +73,7 @@ from app.connectors.sources.google.gmail.individual.connector import (
 )
 from app.connectors.sources.google.gmail.team.connector import GoogleGmailTeamConnector
 from app.connectors.sources.google_cloud_storage.connector import GCSConnector
+from app.connectors.sources.hubspot.connector import HubSpotConnector
 from app.connectors.sources.localKB.connector import KnowledgeBaseConnector
 from app.connectors.sources.linear.connector import LinearConnector
 from app.connectors.sources.local_fs.connector import LocalFsConnector
@@ -161,6 +162,7 @@ class ConnectorFactory:
         "zammad": ZammadConnector,
         "zendesk": ZendeskConnector,
         "zoom": ZoomConnector,
+        "hubspot": HubSpotConnector,
         "salesforce": SalesforceConnector,
         "gitlab": GitLabConnector,
         "gitlabpersonal": GitLabPersonalConnector,

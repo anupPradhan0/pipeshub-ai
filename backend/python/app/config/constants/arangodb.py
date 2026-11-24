@@ -79,6 +79,7 @@ class Connectors(Enum):
     ZAMMAD = "ZAMMAD"
     ZENDESK = "ZENDESK"
     ZOOM = "ZOOM"
+    HUBSPOT = "HUBSPOT"
 
     GITLAB = "GITLAB"
     GITLAB_PERSONAL = "GITLAB PERSONAL"
@@ -173,6 +174,7 @@ class AppGroups(Enum):
     ZAMMAD = "Zammad"
     ZENDESK = "Zendesk"
     ZOOM = "Zoom"
+    HUBSPOT = "HubSpot"
     LOCAL_STORAGE = "Local Storage"
     DEMO = "Demo"
     RSS = "RSS"
