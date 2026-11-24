@@ -28,6 +28,7 @@ on:
             - nextcloud
             - bookstack
             - minio
+            - cloudflare_r2
             - sharepoint
             - sharepoint_sim
             - bookstack_sim
@@ -333,6 +334,12 @@ jobs:
       S3_EXTERNAL_ID: ${{ secrets.S3_EXTERNAL_ID }}
       S3_SECOND_TEST_BUCKET: ${{ secrets.S3_SECOND_TEST_BUCKET }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      CLOUDFLARE_R2_TEST_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_TEST_ACCOUNT_ID }}
+      CLOUDFLARE_R2_TEST_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_TEST_ACCESS_KEY_ID }}
+      CLOUDFLARE_R2_TEST_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_TEST_SECRET_ACCESS_KEY }}
+      CLOUDFLARE_R2_TEST_BUCKET: ${{ secrets.CLOUDFLARE_R2_TEST_BUCKET }}
+      # Optional: TC-ACCESS-REVOKE-001 skips while this is unset.
+      CLOUDFLARE_R2_SECOND_TEST_BUCKET: ${{ secrets.CLOUDFLARE_R2_SECOND_TEST_BUCKET }}
       GCS_SERVICE_ACCOUNT_JSON: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
       AZURE_BLOB_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING }}
       AZURE_FILES_CONNECTION_STRING: ${{ secrets.AZURE_FILES_CONNECTION_STRING }}
@@ -550,7 +557,7 @@ jobs:
       CONN_SHARD_1: "nextcloud or bookstack or bookstack_sim or mariadb or minio or web or local_fs or local_fs_sim or github or sharepoint"
       CONN_SHARD_2: "jira or azure_files or smb or zendesk or outlook or gmail_workspace or gmail_individual or servicenow or zammad_sim"
       CONN_SHARD_3: "notion or confluence or gcs or zammad or sharepoint_sim or postgres or salesforce"
-      CONN_SHARD_4: "google_drive_individual or gitlab or azure_blob or rss or github_teams or linear or servicenow_sim"
+      CONN_SHARD_4: "google_drive_individual or gitlab or azure_blob or rss or github_teams or linear or servicenow_sim or cloudflare_r2"
       CONN_SHARD_5: "google_drive_workspace or s3"
       # Routed through env (never interpolated into the shell) so untrusted
       # dispatch input cannot inject; the test steps pick markers from these.

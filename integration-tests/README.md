@@ -172,6 +172,12 @@ Only needed for the connectors you actually run. If a credential is missing, tha
 | `S3_SECRET_KEY`                  | S3          | AWS secret key. |
 | `S3_REGION`                      | S3          | Optional; default `us-east-1`. |
 | `GCS_SERVICE_ACCOUNT_JSON`       | GCS         | Full JSON key for a GCP service account (single line or multiline string). |
+| `CLOUDFLARE_R2_TEST_ACCOUNT_ID` | Cloudflare R2 | The account ID (32 hex characters) that holds the test bucket. |
+| `CLOUDFLARE_R2_TEST_ACCESS_KEY_ID` | Cloudflare R2 | Access Key ID of an R2 API token that can list buckets and read, write and delete objects in the test bucket. |
+| `CLOUDFLARE_R2_TEST_SECRET_ACCESS_KEY` | Cloudflare R2 | That token's Secret Access Key. |
+| `CLOUDFLARE_R2_TEST_BUCKET`     | Cloudflare R2 | Optional; the pre-provisioned bucket, default `pipeshub-integration-tests`. |
+| `CLOUDFLARE_R2_SECOND_TEST_BUCKET` | Cloudflare R2 | Optional; a second bucket for TC-ACCESS-REVOKE-001, which skips without it. |
+| `CLOUDFLARE_R2_TEST_JURISDICTION` | Cloudflare R2 | Optional; `eu` or `fedramp` for a bucket created in a jurisdiction. |
 | `AZURE_BLOB_CONNECTION_STRING`   | Azure Blob  | Azure Storage connection string for Blob. |
 | `AZURE_FILES_CONNECTION_STRING`  | Azure Files | Azure Storage connection string for File Share. |
 

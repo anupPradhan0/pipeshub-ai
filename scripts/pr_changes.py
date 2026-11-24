@@ -263,7 +263,10 @@ CONNECTOR_SHARDS = {
         "zammad_sim",
     ),
     "connectors-3": ("notion", "confluence", "gcs", "zammad", "sharepoint_sim", "postgres", "salesforce"),
-    "connectors-4": ("google_drive_individual", "gitlab", "azure_blob", "rss", "github_teams", "linear", "servicenow_sim"),
+    "connectors-4": (
+        "google_drive_individual", "gitlab", "azure_blob", "rss", "github_teams", "linear", "servicenow_sim",
+        "cloudflare_r2",
+    ),
     "connectors-5": ("google_drive_workspace", "s3"),
 }
 # The shards a pull request can run, in the workflow's order. Each one waits for
@@ -333,7 +336,7 @@ CONNECTOR_CODE_MARKERS: dict[str, tuple[str, ...]] = {
     **{
         name: ()
         for name in (
-            "airtable", "asana", "bitbucket", "box", "clickhouse", "clickup", "cloudflare_r2", "databricks", "discord",
+            "airtable", "asana", "bitbucket", "box", "clickhouse", "clickup", "databricks", "discord",
             "dropbox_individual", "drupal_wiki", "evernote", "freshdesk", "hackernews", "lattice", "linkedin",
             "lumos", "monday", "pagerduty", "posthog", "redshift", "trello", "workday",
             "zoom",
@@ -355,8 +358,9 @@ CONNECTOR_CODE_MARKERS: dict[str, tuple[str, ...]] = {
     "gitlab_personal": ("gitlab",),
     "google": ("google_drive_workspace", "google_drive_individual", "gmail_workspace", "gmail_individual"),
     "linear": ("linear",),
+    "cloudflare_r2": ("cloudflare_r2",),
     "minio": ("minio",),
-    "s3": ("s3", "minio"),
+    "s3": ("s3", "minio", "cloudflare_r2"),
     "network_share": ("smb",),
     "nextcloud": ("nextcloud",),
     "rss": ("rss",),

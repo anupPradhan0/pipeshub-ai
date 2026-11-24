@@ -50,6 +50,7 @@ ALIASES = {
     "driveworkspace": {"google_drive_workspace"},
     "postgresql": {"postgres"},
     "azureblob": {"azure_blob"},
+    "cloudflarer2": {"cloudflare_r2"},
     "azurefiles": {"azure_files"},
     "localfs": {"local_fs"},
     "sharepointonline": {"sharepoint"},

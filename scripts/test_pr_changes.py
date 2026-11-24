@@ -337,7 +337,7 @@ class TestIntegrationShards(unittest.TestCase):
 
     def test_a_connectors_own_code_runs_its_shard_and_core(self) -> None:
         self.assertEqual(shards("backend/python/app/connectors/sources/zendesk/connector.py"), {"connectors-2", "core"})
-        self.assertEqual(shards("backend/python/app/sources/client/s3/s3.py"), {"connectors-1", "connectors-5", "core"})
+        self.assertEqual(shards("backend/python/app/sources/client/s3/s3.py"), {"connectors-1", "connectors-4", "connectors-5", "core"})
         self.assertEqual(shards("backend/python/app/sources/external/google/drive.py"), {"connectors-2", "connectors-4", "connectors-5", "core"})
 
     def test_a_connector_with_no_suite_runs_core(self) -> None:
