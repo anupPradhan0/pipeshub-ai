@@ -52,7 +52,7 @@ class HubSpotResponse(BaseModel):
 class HubSpotClient(IClient):
     """Holds one authenticated HubSpot SDK instance.
 
-    OAuth access tokens and private-app tokens are both sent as a Bearer token, so
+    OAuth access tokens and service keys are both sent as a Bearer token, so
     one SDK instance serves both auth types.
     """
 

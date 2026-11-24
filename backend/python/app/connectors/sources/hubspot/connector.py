@@ -202,18 +202,18 @@ def _group_grant(external_id: str) -> Permission:
             fields=[CommonFields.client_id("HubSpot"), CommonFields.client_secret("HubSpot")],
             icon_path=IconPaths.connector_icon(Connectors.HUBSPOT.value),
             app_group=AppGroups.HUBSPOT.value,
-            app_description="OAuth app for syncing HubSpot CRM records",
+            app_description="HubSpot project-based app (OAuth) for syncing HubSpot CRM records",
             app_categories=["CRM", "Sales"],
             documentation_links=[DocumentationLink(
-                "HubSpot OAuth apps", "https://developers.hubspot.com/docs/api/oauth-quickstart-guide", "setup",
+                "HubSpot project-based apps (OAuth)", "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/oauth/working-with-oauth", "setup",
             )],
         ),
         AuthBuilder.type(AuthType.API_TOKEN).fields([
             AuthField(
                 name="apiToken",
-                display_name="Service key or private app token",
+                display_name="Service key",
                 placeholder="pat-...",
-                description="A HubSpot service key or private app access token with the read scopes listed in the docs",
+                description="A HubSpot service key with the read scopes listed in the docs",
                 field_type="PASSWORD",
                 required=True,
                 max_length=2000,
@@ -227,7 +227,7 @@ def _group_grant(external_id: str) -> Permission:
         .with_icon(IconPaths.connector_icon(Connectors.HUBSPOT.value))
         .with_realtime_support(False)
         .add_documentation_link(DocumentationLink(
-            "HubSpot private apps", "https://developers.hubspot.com/docs/api/private-apps", "setup",
+            "HubSpot service keys", "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/authentication/account-service-keys", "setup",
         ))
         .with_sync_strategies([SyncStrategy.SCHEDULED, SyncStrategy.MANUAL])
         .with_scheduled_config(True, 60)

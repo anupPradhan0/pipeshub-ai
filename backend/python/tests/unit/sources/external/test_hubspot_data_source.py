@@ -231,7 +231,7 @@ def _config_service(config: dict | None) -> AsyncMock:
 
 @pytest.mark.parametrize(("config", "token"), [
     ({"auth": {"authType": "OAUTH"}, "credentials": {"access_token": "oauth-token"}}, "oauth-token"),
-    ({"auth": {"authType": "API_TOKEN", "apiToken": "private-app-token"}}, "private-app-token"),
+    ({"auth": {"authType": "API_TOKEN", "apiToken": "service-key"}}, "service-key"),
 ])
 async def test_build_from_services_reads_the_instance_token(config: dict, token: str) -> None:
     service = _config_service(config)
