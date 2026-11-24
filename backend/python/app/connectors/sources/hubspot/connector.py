@@ -121,8 +121,8 @@ HUBSPOT_SCOPES = [
     "crm.objects.contacts.read",
     "crm.objects.companies.read",
     "crm.objects.owners.read",
-    "tickets",
-    "files",
+    "crm.objects.tickets.read",
+    "files.read",
     "settings.users.read",
     "settings.users.teams.read",
 ]
