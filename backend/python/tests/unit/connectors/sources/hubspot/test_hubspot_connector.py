@@ -11,7 +11,17 @@ from app.config.constants.arangodb import MimeTypes, ProgressStatus
 from app.connectors.core.base.connector.connector_service import ConnectorInitError
 from app.connectors.sources.hubspot import connector as connector_module
 from app.connectors.sources.hubspot.connector import HubSpotAuthError, HubSpotConnector
-from app.models.entities import DealRecord, FileRecord, RecordType, TicketRecord
+from app.models.entities import (
+    CommentRecord,
+    DealRecord,
+    FileRecord,
+    MailRecord,
+    MeetingRecord,
+    ProductRecord,
+    RecordType,
+    TicketRecord,
+    WebpageRecord,
+)
 from app.sources.client.hubspot.hubspot import HubSpotClient, HubSpotResponse
 from app.sources.client.resilience import ResiliencePolicy
 
@@ -55,6 +65,12 @@ class FakeHubSpot:
                              hs_ticket_priority="HIGH", hubspot_owner_id="101", hs_shared_user_ids="3")],
             "tasks": [],
             "meetings": [],
+            "notes": [],
+            "calls": [],
+            "emails": [],
+            "contacts": [],
+            "companies": [],
+            "products": [],
         }
         self.archived: dict[str, list[dict]] = {}
         self.links = {("deals", "companies"): {"11": ["501"]}, ("deals", "contacts"): {"11": ["601"]},
@@ -247,10 +263,58 @@ async def test_first_sync_writes_users_groups_and_records(hubspot: FakeHubSpot, 
     assert file_record.mime_type == MimeTypes.PDF.value and file_grants == ["super_admins"]
 
     [groups_call] = connector.data_entities_processor.on_new_record_groups.await_args_list
-    assert sorted(g.external_group_id for g, _ in groups_call.args[0]) == ["deals", "files", "meetings", "tasks", "tickets"]
+    assert sorted(g.external_group_id for g, _ in groups_call.args[0]) == [
+        "calls", "companies", "contacts", "deals", "emails", "files", "meetings", "notes", "products", "tasks", "tickets"]
     # Everyone may browse a folder; records do not inherit from it.
     assert all(sorted(p.external_id for p in grants) == ["all_users", "super_admins"] for _, grants in groups_call.args[0])
     assert connector.full_sync_coverage().complete
+
+
+async def test_activities_people_and_products_become_records(hubspot: FakeHubSpot, monkeypatch: pytest.MonkeyPatch) -> None:
+    hubspot.objects["notes"] = [_obj("31", hs_note_body="<p>Asked for a <b>pilot</b> in Q3.</p><p>More later</p>",
+                                     hubspot_owner_id="101")]
+    hubspot.objects["calls"] = [_obj("32", hs_call_title="Discovery call", hs_call_body="Budget is approved",
+                                     hs_call_duration="125000", hs_call_recording_url="https://rec.example/1",
+                                     hs_timestamp="2026-11-01T10:00:00Z", hubspot_owner_id="101")]
+    hubspot.objects["emails"] = [_obj("33", hs_email_subject="Re: pricing", hs_email_text="See the attached quote",
+                                      hs_email_from_email="rep@acme.com", hs_email_to_email="maya@northwind.example;ops@northwind.example",
+                                      hubspot_owner_id="101")]
+    hubspot.objects["contacts"] = [_obj("601", firstname="Maya", lastname="Chen", email="maya@northwind.example",
+                                        jobtitle="CTO", hubspot_owner_id="101")]
+    hubspot.objects["companies"] = [_obj("501", name="Northwind", domain="northwind.example", industry="Logistics")]
+    hubspot.objects["products"] = [_obj("701", name="Tracker", price="99", hs_sku="TRK-1")]
+    hubspot.links[("notes", "deals")] = {"31": ["11"]}
+    hubspot.links[("deals", "line_items")] = {"11": ["801"]}
+    hubspot.details["line_items"] = {"801": {"name": "Tracker", "quantity": "40", "price": "99", "amount": "3960"}}
+    connector = _connector(hubspot, monkeypatch, access={"notes_view_all": ["user:3"]})
+
+    await connector.run_sync()
+
+    written = _written(connector)
+    note, note_grants = written["0-46:31"]
+    assert isinstance(note, CommentRecord) and note.record_type == RecordType.COMMENT
+    assert note.record_name == "Asked for a **pilot** in Q3." and note.author_source_id == "2"
+    assert note_grants == ["all_notes", "owner_2_notes", "super_admins"]
+    assert [r.external_record_id for r in note.related_external_records] == ["0-3:11"]
+    call, _ = written["0-48:32"]
+    assert isinstance(call, MeetingRecord) and (call.record_name, call.duration_minutes) == ("Discovery call", 2)
+    assert call.recording_url == "https://rec.example/1"
+    email, _ = written["0-49:33"]
+    assert isinstance(email, MailRecord) and email.record_type == RecordType.MAIL
+    assert email.to_emails == ["maya@northwind.example", "ops@northwind.example"]
+    contact, contact_grants = written["0-1:601"]
+    assert isinstance(contact, WebpageRecord) and contact.record_name == "Maya Chen"
+    assert contact_grants == ["all_contacts", "owner_2_contacts", "super_admins"]
+    assert isinstance(written["0-2:501"][0], WebpageRecord) and written["0-2:501"][1] == ["all_companies", "super_admins"]
+    product, product_grants = written["0-7:701"]
+    assert isinstance(product, ProductRecord) and (product.sku, product.list_price) == ("TRK-1", 99.0)
+    assert product_grants == ["all_users", "super_admins"]  # no owner: every HubSpot user picks products
+    groups = _groups(connector)
+    assert groups["all_notes"] == ["teammate@acme.com"] and "all_products" not in groups
+
+    body = json.loads(b"".join([c async for c in (await connector.stream_record(written["0-3:11"][0])).body_iterator]))
+    assert "## Line items" in body["block_groups"][0]["data"]
+    assert "- Tracker (qty 40, unit price 99, total 3960)" in body["block_groups"][0]["data"]
 
 
 async def test_view_access_follows_the_admins_role_and_user_lists(hubspot: FakeHubSpot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,4 +526,23 @@ async def test_deleted_meetings_are_not_listed(hubspot: FakeHubSpot, monkeypatch
     await connector.run_sync()
 
     archived_listings = {c[1][0] for c in hubspot.calls if c[0] == "list_objects" and c[2].get("archived")}
-    assert archived_listings == {"deals", "tickets", "tasks"}
+    assert archived_listings == {"deals", "tickets", "tasks", "notes", "calls", "emails", "contacts", "companies", "products"}
+
+
+async def test_a_type_without_its_scope_is_skipped_and_the_rest_syncs(hubspot: FakeHubSpot, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = HubSpotResponse(success=False, status_code=403, category="MISSING_SCOPES",
+                              error="MISSING_SCOPES: This app hasn't been granted all required scopes (HTTP 403)")
+    real_list = hubspot._list_objects
+
+    def list_objects(object_type: str, **kwargs: object) -> HubSpotResponse:
+        return missing if object_type == "emails" else real_list(object_type, **kwargs)
+    hubspot._list_objects = list_objects
+    connector = _connector(hubspot, monkeypatch)
+
+    await connector.run_sync()
+
+    assert {"0-3:11", "0-5:21", "file:7"} <= set(_written(connector))
+    # Nothing is deleted on the strength of a listing that did not run.
+    assert not connector.full_sync_coverage().complete
+    [notice] = connector.notify.await_args_list
+    assert "Emails" in notice.args[3] and "sales-email-read" in notice.args[3]

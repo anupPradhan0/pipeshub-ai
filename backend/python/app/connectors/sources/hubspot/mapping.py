@@ -9,6 +9,9 @@ which errs towards hiding.
 A record grants groups, never users: ``all_<type>``, its owner's ``owner_<user>_<type>``,
 ``super_admins``, and its shared users' and teams' groups. Memberships are rewritten every
 sync, so a role, team or user change takes effect without touching the records.
+
+Products have no owner and every HubSpot user picks them when adding line items, so they
+are granted to every active user. A deal's line items are part of the deal's text.
 """
 
 import hashlib
@@ -26,10 +29,13 @@ from app.config.constants.arangodb import (
 )
 from app.connectors.utils.record_ids import new_record_id
 from app.models.entities import (
+    CommentRecord,
     DealRecord,
     FileRecord,
+    MailRecord,
     MeetingRecord,
     Priority,
+    ProductRecord,
     Record,
     RecordGroup,
     RecordGroupType,
@@ -37,6 +43,7 @@ from app.models.entities import (
     RelatedExternalRecord,
     Status,
     TicketRecord,
+    WebpageRecord,
 )
 from app.models.permission import EntityType, Permission, PermissionType
 from app.utils.html_markdown import html_to_markdown
@@ -68,7 +75,10 @@ LINKED_PROPERTIES = {
     "companies": ("name", "domain", "industry", "city"),
     "deals": ("dealname",),
     "tickets": ("subject",),
+    "line_items": ("name", "quantity", "price", "amount", "hs_sku"),
 }
+# ponytail: a note has no title in HubSpot; its first words stand in, cut here.
+TITLE_CHARS = 80
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,8 @@ class ObjectSpec:
     # HubSpot refuses to page deleted meetings (HTTP 400 "not yet supported for object type
     # 0-47"); their deletions wait for a full sync's cleanup.
     lists_archived: bool = True
+    # False for objects without an owner (products): no owner groups, no "All"/"Team" lists.
+    owned: bool = True
 
     @property
     def all_properties(self) -> list[str]:
@@ -95,7 +107,7 @@ DEALS = ObjectSpec(
     "deals", "0-3", "Deal", "Deals", RecordType.DEAL, RecordGroupType.DEAL, "dealname",
     ("dealname", "amount", "dealstage", "pipeline", "closedate", "description", "dealtype",
      "hs_priority", "hs_is_closed", "hs_is_closed_won", "createdate"),
-    ("companies", "contacts"),
+    ("companies", "contacts", "line_items"),
 )
 TICKETS = ObjectSpec(
     "tickets", "0-5", "Ticket", "Tickets", RecordType.TICKET, RecordGroupType.CASE, "subject",
@@ -116,10 +128,49 @@ MEETINGS = ObjectSpec(
     ("companies", "contacts", "deals", "tickets"),
     lists_archived=False,
 )
-OBJECT_SPECS = (DEALS, TICKETS, TASKS, MEETINGS)
+_ACTIVITY_LINKS = ("companies", "contacts", "deals", "tickets")
+NOTES = ObjectSpec(
+    "notes", "0-46", "Note", "Notes", RecordType.COMMENT, RecordGroupType.TASK, "hs_note_body",
+    ("hs_note_body", "hs_timestamp", "hs_createdate"),
+    _ACTIVITY_LINKS,
+)
+CALLS = ObjectSpec(
+    "calls", "0-48", "Call", "Calls", RecordType.MEETING, RecordGroupType.TASK, "hs_call_title",
+    ("hs_call_title", "hs_call_body", "hs_call_direction", "hs_call_disposition", "hs_call_duration",
+     "hs_call_status", "hs_call_recording_url", "hs_call_from_number", "hs_call_to_number",
+     "hs_timestamp", "hs_createdate"),
+    _ACTIVITY_LINKS,
+)
+EMAILS = ObjectSpec(
+    "emails", "0-49", "Email", "Emails", RecordType.MAIL, RecordGroupType.MAILBOX, "hs_email_subject",
+    ("hs_email_subject", "hs_email_text", "hs_email_html", "hs_email_direction", "hs_email_status",
+     "hs_email_from_email", "hs_email_to_email", "hs_email_cc_email", "hs_email_bcc_email",
+     "hs_timestamp", "hs_createdate"),
+    _ACTIVITY_LINKS,
+)
+CONTACTS = ObjectSpec(
+    "contacts", "0-1", "Contact", "Contacts", RecordType.WEBPAGE, RecordGroupType.WEB, "email",
+    ("firstname", "lastname", "email", "phone", "mobilephone", "jobtitle", "company", "lifecyclestage",
+     "hs_lead_status", "city", "state", "country", "createdate"),
+    ("companies", "deals", "tickets"),
+)
+COMPANIES = ObjectSpec(
+    "companies", "0-2", "Company", "Companies", RecordType.WEBPAGE, RecordGroupType.WEB, "name",
+    ("name", "domain", "industry", "phone", "city", "state", "country", "numberofemployees",
+     "annualrevenue", "lifecyclestage", "description", "createdate"),
+    ("contacts", "deals", "tickets"),
+)
+PRODUCTS = ObjectSpec(
+    "products", "0-7", "Product", "Products", RecordType.PRODUCT, RecordGroupType.PRODUCT, "name",
+    ("name", "description", "price", "hs_sku", "hs_product_type", "hs_recurring_billing_period", "createdate"),
+    (),
+    owned=False,
+)
+OBJECT_SPECS = (DEALS, TICKETS, TASKS, MEETINGS, NOTES, CALLS, EMAILS, CONTACTS, COMPANIES, PRODUCTS)
+OWNED_SPECS = tuple(spec for spec in OBJECT_SPECS if spec.owned)
 SPECS_BY_NAME = {spec.name: spec for spec in OBJECT_SPECS}
 SPECS_BY_TYPE_ID = {spec.type_id: spec for spec in OBJECT_SPECS}
-RECORD_TYPE_OF = {"deals": RecordType.DEAL, "tickets": RecordType.TICKET}
+RECORD_TYPE_OF = {spec.name: spec.record_type for spec in OBJECT_SPECS if spec.name in ("deals", "tickets", "contacts", "companies")}
 
 _TICKET_PRIORITY = {"LOW": Priority.LOW, "MEDIUM": Priority.MEDIUM, "HIGH": Priority.HIGH, "URGENT": Priority.CRITICAL}
 _TASK_STATUS = {
@@ -198,6 +249,8 @@ def owner_group_id(user_id: str, object_type: str) -> str:
 
 def record_permissions(object_type: str, props: Mapping[str, object], directory: Directory) -> list[Permission]:
     """Super Admins, the type's "All" viewers, the owner with their "Team" viewers, and shares."""
+    if not SPECS_BY_NAME[object_type].owned:
+        return [_group(SUPER_ADMINS_GROUP_ID), _group(ALL_USERS_GROUP_ID)]
     grants = [SUPER_ADMINS_GROUP_ID, all_group_id(object_type)]
     owner = directory.owners.get(str(props.get("hubspot_owner_id") or ""))
     owner_user = owner.get("user_id") if owner else None
@@ -222,6 +275,10 @@ def _linked_lines(object_type: str, linked: list[Mapping[str, object]]) -> list[
         elif object_type == "companies":
             name = props.get("name") or props.get("domain") or "(no name)"
             details = ", ".join(str(p) for p in (props.get("domain"), props.get("industry"), props.get("city")) if p)
+        elif object_type == "line_items":
+            name = props.get("name") or "(no name)"
+            details = ", ".join(f"{label} {props[key]}" for key, label in (
+                ("quantity", "qty"), ("price", "unit price"), ("amount", "total"), ("hs_sku", "SKU")) if props.get(key))
         else:
             name = props.get("dealname") or props.get("subject") or f"#{item.get('id')}"
             details = ""
@@ -234,6 +291,22 @@ def _body(value: object) -> str:
     return html_to_markdown(text).strip() if "<" in text else text
 
 
+def record_title(spec: ObjectSpec, obj: Mapping[str, object]) -> str:
+    props = obj.get("properties") or {}
+    if spec is CONTACTS:
+        title = " ".join(p for p in (props.get("firstname"), props.get("lastname")) if p) or props.get("email")
+    elif spec is NOTES:
+        first = next((line.strip("#*-> ").strip() for line in _body(props.get("hs_note_body")).splitlines() if line.strip()), "")
+        title = first[:TITLE_CHARS] + ("..." if len(first) > TITLE_CHARS else "")
+    else:
+        title = props.get(spec.title_property)
+    return str(title or f"{spec.label} {obj.get('id')}")
+
+
+def _emails(value: object) -> list[str]:
+    return [e.strip() for e in str(value or "").replace(",", ";").split(";") if e.strip()]
+
+
 def render_markdown(
     spec: ObjectSpec,
     obj: Mapping[str, object],
@@ -242,8 +315,7 @@ def render_markdown(
 ) -> str:
     """The text indexed for one object. Its hash is the record's revision, so keep it free of volatile fields."""
     props = obj.get("properties") or {}
-    title = props.get(spec.title_property) or f"{spec.label} {obj.get('id')}"
-    lines = [f"# {title}", "", f"**Type:** HubSpot {spec.label.lower()}"]
+    lines = [f"# {record_title(spec, obj)}", "", f"**Type:** HubSpot {spec.label.lower()}"]
     pipeline = props.get("pipeline") or props.get("hs_pipeline")
     stage = props.get("dealstage") or props.get("hs_pipeline_stage")
     fields: list[str | None] = [
@@ -260,14 +332,47 @@ def render_markdown(
     elif spec is TASKS:
         fields += [_line("Status", props.get("hs_task_status")), _line("Priority", props.get("hs_task_priority")),
                    _line("Task type", props.get("hs_task_type")), _line("Due", props.get("hs_timestamp"))]
-    else:
+    elif spec is MEETINGS:
         fields += [_line("Starts", props.get("hs_meeting_start_time")), _line("Ends", props.get("hs_meeting_end_time")),
                    _line("Location", props.get("hs_meeting_location")), _line("Outcome", props.get("hs_meeting_outcome"))]
+    elif spec is NOTES:
+        fields += [_line("Date", props.get("hs_timestamp"))]
+    elif spec is CALLS:
+        duration = _float(props.get("hs_call_duration"))
+        fields += [_line("Date", props.get("hs_timestamp")), _line("Direction", props.get("hs_call_direction")),
+                   _line("Status", props.get("hs_call_status")), _line("Outcome", props.get("hs_call_disposition")),
+                   _line("Duration", f"{round(duration / 1000)}s" if duration else None),
+                   _line("From", props.get("hs_call_from_number")), _line("To", props.get("hs_call_to_number")),
+                   _line("Recording", props.get("hs_call_recording_url"))]
+    elif spec is EMAILS:
+        fields += [_line("Date", props.get("hs_timestamp")), _line("Direction", props.get("hs_email_direction")),
+                   _line("Status", props.get("hs_email_status")), _line("From", props.get("hs_email_from_email")),
+                   _line("To", ", ".join(_emails(props.get("hs_email_to_email"))) or None),
+                   _line("Cc", ", ".join(_emails(props.get("hs_email_cc_email"))) or None)]
+    elif spec is CONTACTS:
+        place = ", ".join(str(p) for p in (props.get("city"), props.get("state"), props.get("country")) if p)
+        fields += [_line("Email", props.get("email")), _line("Phone", props.get("phone") or props.get("mobilephone")),
+                   _line("Job title", props.get("jobtitle")), _line("Company", props.get("company")),
+                   _line("Lifecycle stage", props.get("lifecyclestage")), _line("Lead status", props.get("hs_lead_status")),
+                   _line("Location", place or None)]
+    elif spec is COMPANIES:
+        place = ", ".join(str(p) for p in (props.get("city"), props.get("state"), props.get("country")) if p)
+        fields += [_line("Domain", props.get("domain")), _line("Industry", props.get("industry")),
+                   _line("Phone", props.get("phone")), _line("Employees", props.get("numberofemployees")),
+                   _line("Annual revenue", props.get("annualrevenue")), _line("Lifecycle stage", props.get("lifecyclestage")),
+                   _line("Location", place or None)]
+    elif spec is PRODUCTS:
+        fields += [_line("Price", props.get("price")), _line("SKU", props.get("hs_sku")),
+                   _line("Product type", props.get("hs_product_type")),
+                   _line("Billing period", props.get("hs_recurring_billing_period"))]
     lines += [f for f in fields if f]
-    body = _body(props.get("description") or props.get("content") or props.get("hs_task_body") or props.get("hs_meeting_body"))
+    body = _body(props.get("description") or props.get("content") or props.get("hs_task_body")
+                 or props.get("hs_meeting_body") or props.get("hs_note_body") or props.get("hs_call_body")
+                 or props.get("hs_email_text") or props.get("hs_email_html"))
     if body:
         lines += ["", "## Description", "", body]
-    for object_type, heading in (("companies", "Companies"), ("contacts", "Contacts"), ("deals", "Deals"), ("tickets", "Tickets")):
+    for object_type, heading in (("line_items", "Line items"), ("companies", "Companies"), ("contacts", "Contacts"),
+                                 ("deals", "Deals"), ("tickets", "Tickets")):
         items = _linked_lines(object_type, list(linked.get(object_type) or []))
         if items:
             lines += ["", f"## {heading}", "", *items]
@@ -301,7 +406,7 @@ def build_record(
     owner = directory.owners.get(str(props.get("hubspot_owner_id") or "")) or {}
     common: dict[str, object] = {
         "id": new_record_id(connector_id, record_external_id),
-        "record_name": str(props.get(spec.title_property) or f"{spec.label} {object_id}"),
+        "record_name": record_title(spec, obj),
         "record_type": spec.record_type,
         "record_group_type": spec.group_type,
         "external_record_id": record_external_id,
@@ -317,6 +422,16 @@ def build_record(
         "source_updated_at": to_ms(obj.get("updated_at")),
         # Each record carries its own grants; the Deals/Tickets folder does not open it.
         "inherit_permissions": False,
+        "related_external_records": [
+            RelatedExternalRecord(
+                external_record_id=external_id(SPECS_BY_NAME[object_type], linked_id),
+                record_type=record_type,
+                relation_type=RecordRelations.LINKED_TO,
+            )
+            for object_type, record_type in RECORD_TYPE_OF.items()
+            if object_type != spec.name
+            for linked_id in linked_ids.get(object_type) or []
+        ],
     }
     if not index:
         common["indexing_status"] = ProgressStatus.AUTO_INDEX_OFF.value
@@ -342,6 +457,30 @@ def build_record(
             end_time=props.get("hs_meeting_end_time"),
             duration_minutes=(end - start) // 60_000 if start and end and end >= start else None,
         )
+    if spec is CALLS:
+        duration = _float(props.get("hs_call_duration"))
+        return MeetingRecord(
+            **common,
+            host_email=owner.get("email"),
+            start_time=props.get("hs_timestamp"),
+            duration_minutes=int(duration // 60_000) if duration else None,
+            recording_url=props.get("hs_call_recording_url"),
+        )
+    if spec is NOTES:
+        return CommentRecord(**common, author_source_id=str(owner.get("user_id") or props.get("hubspot_owner_id") or ""))
+    if spec is EMAILS:
+        return MailRecord(
+            **common,
+            subject=props.get("hs_email_subject"),
+            from_email=props.get("hs_email_from_email"),
+            to_emails=_emails(props.get("hs_email_to_email")),
+            cc_emails=_emails(props.get("hs_email_cc_email")),
+            bcc_emails=_emails(props.get("hs_email_bcc_email")),
+        )
+    if spec in (CONTACTS, COMPANIES):
+        return WebpageRecord(**common)
+    if spec is PRODUCTS:
+        return ProductRecord(**common, sku=props.get("hs_sku"), list_price=_float(props.get("price")))
     if spec is TICKETS:
         stage = directory.stages.get((spec.name, str(props.get("hs_pipeline_stage")))) or {}
         state = str(stage.get("state") or "").upper()
@@ -352,16 +491,6 @@ def build_record(
         status = _TASK_STATUS.get(str(props.get("hs_task_status") or "").upper())
         priority = _TICKET_PRIORITY.get(str(props.get("hs_task_priority") or "").upper())
         source_status = props.get("hs_task_status")
-    related = [
-        RelatedExternalRecord(
-            external_record_id=external_id(SPECS_BY_NAME[object_type], linked_id),
-            record_type=RECORD_TYPE_OF[object_type],
-            relation_type=RecordRelations.LINKED_TO,
-        )
-        for object_type in ("deals", "tickets")
-        if object_type in RECORD_TYPE_OF and object_type != spec.name
-        for linked_id in linked_ids.get(object_type) or []
-    ]
     return TicketRecord(
         **common,
         status=status,
@@ -369,7 +498,6 @@ def build_record(
         priority=priority,
         assignee=owner.get("name") or owner.get("email"),
         assignee_email=owner.get("email"),
-        related_external_records=related,
     )
 
 

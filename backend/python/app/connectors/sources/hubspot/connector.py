@@ -1,4 +1,4 @@
-"""HubSpot connector: deals, tickets, tasks, meetings and files, with HubSpot's record access."""
+"""HubSpot connector: CRM objects, activities, products and files, with HubSpot's record access."""
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
@@ -67,6 +67,7 @@ from app.connectors.sources.hubspot.mapping import (
     FILES_GROUP_ID,
     LINKED_PROPERTIES,
     OBJECT_SPECS,
+    OWNED_SPECS,
     SCOPE_ALL,
     SCOPE_TEAM,
     SPECS_BY_TYPE_ID,
@@ -122,6 +123,9 @@ HUBSPOT_SCOPES = [
     "crm.objects.companies.read",
     "crm.objects.owners.read",
     "crm.objects.tickets.read",
+    "crm.objects.line_items.read",
+    "crm.objects.products.read",
+    "sales-email-read",
     "files.read",
     "settings.users.read",
     "settings.users.teams.read",
@@ -156,7 +160,7 @@ def _access_filter_key(object_type: str, scope: str) -> str:
 def _access_filters() -> list[FilterField]:
     """Per object type, who HubSpot lets see all records, or their teams' records."""
     fields = []
-    for spec in OBJECT_SPECS:
+    for spec in OWNED_SPECS:
         for scope, label, meaning in (
             (SCOPE_ALL, "All", "every record of this type"),
             (SCOPE_TEAM, "Team", "the records owned by anyone on their teams"),
@@ -179,6 +183,11 @@ def _access_filters() -> list[FilterField]:
 def _with_access_filters(builder: Any) -> Any:  # noqa: ANN401 - the registry's builder type is private
     for field in _access_filters():
         builder = builder.add_filter_field(field)
+    for spec in OBJECT_SPECS:
+        builder = builder.add_filter_field(FilterField(
+            name=spec.name, display_name=f"Index {spec.group_name}", filter_type=FilterType.BOOLEAN,
+            category=FilterCategory.INDEXING, default_value=True,
+        ))
     return builder
 
 
@@ -188,7 +197,7 @@ def _group_grant(external_id: str) -> Permission:
 
 @ConnectorBuilder("HubSpot")\
     .in_group(AppGroups.HUBSPOT.value)\
-    .with_description("Sync deals, tickets, tasks, meetings and files from HubSpot")\
+    .with_description("Sync deals, tickets, contacts, companies, products, activities and files from HubSpot")\
     .with_categories(["CRM", "Sales"])\
     .with_scopes([ConnectorScope.TEAM.value])\
     .with_permission_model(PermissionModel.RECORD_LEVEL)\
@@ -234,14 +243,6 @@ def _group_grant(external_id: str) -> Permission:
         .with_sync_support(True)
         .with_agent_support(False)
         .add_filter_field(CommonFields.enable_manual_sync_filter())
-        .add_filter_field(FilterField(name="deals", display_name="Index Deals", filter_type=FilterType.BOOLEAN,
-                                      category=FilterCategory.INDEXING, default_value=True))
-        .add_filter_field(FilterField(name="tickets", display_name="Index Tickets", filter_type=FilterType.BOOLEAN,
-                                      category=FilterCategory.INDEXING, default_value=True))
-        .add_filter_field(FilterField(name="tasks", display_name="Index Tasks", filter_type=FilterType.BOOLEAN,
-                                      category=FilterCategory.INDEXING, default_value=True))
-        .add_filter_field(FilterField(name="meetings", display_name="Index Meetings", filter_type=FilterType.BOOLEAN,
-                                      category=FilterCategory.INDEXING, default_value=True))
         .add_filter_field(FilterField(name="files", display_name="Index Files", filter_type=FilterType.BOOLEAN,
                                       category=FilterCategory.INDEXING, default_value=True))
     )\
@@ -384,9 +385,26 @@ class HubSpotConnector(BaseConnector):
             await self._sync_people(directory)
             self._directory = directory
             await self._sync_record_groups(directory)
+            refused = []
             for spec in OBJECT_SPECS:
-                await self._sync_object_type(spec, directory)
+                try:
+                    await self._sync_object_type(spec, directory)
+                except HubSpotApiError as e:
+                    # A connection made before a type was added lacks its scope; the other types still sync.
+                    if isinstance(e, (HubSpotAuthError, HubSpotQuotaError)) or e.response.status_code != HTTPStatus.FORBIDDEN:
+                        raise
+                    self.logger.warning("HubSpot connector %s skipped %s: %s", self.connector_id, spec.name, e)
+                    self._coverage_complete = False
+                    refused.append(spec.group_name)
             await self._sync_files(directory)
+            if refused:
+                await self.notify(
+                    NotificationType.CONNECTOR_SYNC_ERROR,
+                    NotificationSeverity.WARNING,
+                    self._notification_title("some data was not synced"),
+                    f"HubSpot refused {self.display_name} access to {', '.join(refused)}. Sign in again, or give the "
+                    f"service key the scopes {', '.join(s for s in HUBSPOT_SCOPES if s != 'oauth')}.",
+                )
         except HubSpotAuthError as e:
             self.logger.error("HubSpot sync for connector %s stopped: %s", self.connector_id, e)
             await self.notify(
@@ -494,7 +512,7 @@ class HubSpotConnector(BaseConnector):
                 self._user_group(f"{TEAM_GROUP_PREFIX}{team['id']}", f"HubSpot team {team.get('name') or team['id']}"),
                 [app_users[i] for i in dict.fromkeys(member_ids) if i in app_users],
             ))
-        for spec in OBJECT_SPECS:
+        for spec in OWNED_SPECS:
             scope_of = self._scopes(spec.name, roles)
             groups.append((
                 self._user_group(all_group_id(spec.name), f"HubSpot: all {spec.group_name}"),
@@ -788,7 +806,7 @@ class HubSpotConnector(BaseConnector):
     async def get_filter_options(
         self, filter_key: str, page: int = 1, limit: int = 20, search: str | None = None, cursor: str | None = None
     ) -> FilterOptionsResponse:
-        if filter_key not in {_access_filter_key(spec.name, scope) for spec in OBJECT_SPECS for scope in (SCOPE_ALL, SCOPE_TEAM)}:
+        if filter_key not in {_access_filter_key(spec.name, scope) for spec in OWNED_SPECS for scope in (SCOPE_ALL, SCOPE_TEAM)}:
             raise ValueError(f"HubSpot has no dynamic filter {filter_key!r}")
         await self._rebuild_client()
         options: list[FilterOption] = []
