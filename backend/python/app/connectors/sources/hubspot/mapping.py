@@ -68,7 +68,6 @@ ACCESS_PROPERTIES = (
     "hs_all_team_ids",
     "hs_shared_user_ids",
     "hs_shared_team_ids",
-    "hs_lastmodifieddate",
 )
 LINKED_PROPERTIES = {
     "contacts": ("firstname", "lastname", "email", "jobtitle", "phone"),
@@ -97,10 +96,12 @@ class ObjectSpec:
     lists_archived: bool = True
     # False for objects without an owner (products): no owner groups, no "All"/"Team" lists.
     owned: bool = True
+    # Contacts keep it in "lastmodifieddate"; searching them on hs_lastmodifieddate matches nothing.
+    modified_property: str = "hs_lastmodifieddate"
 
     @property
     def all_properties(self) -> list[str]:
-        return list(dict.fromkeys(self.properties + ACCESS_PROPERTIES))
+        return list(dict.fromkeys(self.properties + ACCESS_PROPERTIES + (self.modified_property,)))
 
 
 DEALS = ObjectSpec(
@@ -153,6 +154,7 @@ CONTACTS = ObjectSpec(
     ("firstname", "lastname", "email", "phone", "mobilephone", "jobtitle", "company", "lifecyclestage",
      "hs_lead_status", "city", "state", "country", "createdate"),
     ("companies", "deals", "tickets"),
+    modified_property="lastmodifieddate",
 )
 COMPANIES = ObjectSpec(
     "companies", "0-2", "Company", "Companies", RecordType.WEBPAGE, RecordGroupType.WEB, "name",
@@ -298,6 +300,8 @@ def record_title(spec: ObjectSpec, obj: Mapping[str, object]) -> str:
     elif spec is NOTES:
         first = next((line.strip("#*-> ").strip() for line in _body(props.get("hs_note_body")).splitlines() if line.strip()), "")
         title = first[:TITLE_CHARS] + ("..." if len(first) > TITLE_CHARS else "")
+    elif spec is COMPANIES:
+        title = props.get("name") or props.get("domain")
     else:
         title = props.get(spec.title_property)
     return str(title or f"{spec.label} {obj.get('id')}")

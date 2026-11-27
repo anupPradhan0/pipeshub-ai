@@ -132,8 +132,11 @@ class FakeHubSpot:
 
     def _search_objects(self, object_type: str, filter_groups: list, sorts: list, properties: list,
                         limit: int, after: str | None) -> HubSpotResponse:
-        since = int(filter_groups[0]["filters"][0]["value"])
-        items = [o for o in self.objects[object_type] if o["updated_at"].timestamp() * 1000 >= since]
+        condition = filter_groups[0]["filters"][0]
+        since = datetime.fromtimestamp(int(condition["value"]) / 1000, tz=timezone.utc)
+        # Like HubSpot: an object without the filtered property never matches.
+        items = [o for o in self.objects[object_type]
+                 if (stamp := o["properties"].get(condition["propertyName"])) and datetime.fromisoformat(stamp) >= since]
         return self._page("search_objects", items, limit, after)
 
     def _batch_read_associations(self, from_type: str, to_type: str, ids: list[str]) -> HubSpotResponse:
@@ -281,7 +284,8 @@ async def test_activities_people_and_products_become_records(hubspot: FakeHubSpo
                                       hubspot_owner_id="101")]
     hubspot.objects["contacts"] = [_obj("601", firstname="Maya", lastname="Chen", email="maya@northwind.example",
                                         jobtitle="CTO", hubspot_owner_id="101")]
-    hubspot.objects["companies"] = [_obj("501", name="Northwind", domain="northwind.example", industry="Logistics")]
+    hubspot.objects["companies"] = [_obj("501", name="Northwind", domain="northwind.example", industry="Logistics"),
+                                    _obj("502", domain="bluepeak.example")]
     hubspot.objects["products"] = [_obj("701", name="Tracker", price="99", hs_sku="TRK-1")]
     hubspot.links[("notes", "deals")] = {"31": ["11"]}
     hubspot.links[("deals", "line_items")] = {"11": ["801"]}
@@ -306,6 +310,7 @@ async def test_activities_people_and_products_become_records(hubspot: FakeHubSpo
     assert isinstance(contact, WebpageRecord) and contact.record_name == "Maya Chen"
     assert contact_grants == ["all_contacts", "owner_2_contacts", "super_admins"]
     assert isinstance(written["0-2:501"][0], WebpageRecord) and written["0-2:501"][1] == ["all_companies", "super_admins"]
+    assert written["0-2:502"][0].record_name == "bluepeak.example"
     product, product_grants = written["0-7:701"]
     assert isinstance(product, ProductRecord) and (product.sku, product.list_price) == ("TRK-1", 99.0)
     assert product_grants == ["all_users", "super_admins"]  # no owner: every HubSpot user picks products
@@ -427,6 +432,23 @@ async def test_incremental_sync_reads_changes_and_deletes_archived(hubspot: Fake
     assert deal.record_name == "Fleet rollout v2" and grants == ["all_deals", "owner_1_deals", "super_admins"]
     deleted = [c.args[1] for c in connector.data_entities_processor.delete_record_by_external_id.await_args_list]
     assert deleted == ["0-3:12"]  # archived before the last run: already handled then
+
+
+async def test_incremental_sync_finds_contacts_by_their_own_modified_property(
+    hubspot: FakeHubSpot, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector = _connector(hubspot, monkeypatch)
+    await connector.run_sync()
+    since = connector.records_sync_point.store["contacts"]["lastModifiedMs"]
+    later = datetime.fromtimestamp(since / 1000 + 60, tz=timezone.utc)
+    contact = _obj("602", updated=later, firstname="Elena", lastname="Park")
+    contact["properties"]["lastmodifieddate"] = contact["properties"].pop("hs_lastmodifieddate")
+    hubspot.objects["contacts"] = [contact]
+
+    await connector.run_sync()
+
+    assert _written(connector)["0-1:602"][0].record_name == "Elena Park"
+    assert connector.records_sync_point.store["contacts"]["lastModifiedMs"] >= later.timestamp() * 1000 - 60_000
 
 
 async def test_a_failed_page_holds_the_checkpoint_and_marks_coverage_incomplete(

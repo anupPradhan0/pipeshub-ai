@@ -580,7 +580,7 @@ class HubSpotConnector(BaseConnector):
         written = 0
         async for objects in pages:
             await self._rebuild_client()
-            stamps = [to_ms((o.get("properties") or {}).get("hs_lastmodifieddate")) or to_ms(o.get("updated_at")) for o in objects]
+            stamps = [to_ms((o.get("properties") or {}).get(spec.modified_property)) or to_ms(o.get("updated_at")) for o in objects]
             try:
                 written += await self._write_objects(spec, objects, directory)
             except (HubSpotAuthError, HubSpotQuotaError):
@@ -610,8 +610,8 @@ class HubSpotConnector(BaseConnector):
                     f"search {spec.name} modified since {lower}",
                     "search_objects",
                     spec.name,
-                    filter_groups=[{"filters": [{"propertyName": "hs_lastmodifieddate", "operator": "GTE", "value": str(lower)}]}],
-                    sorts=[{"propertyName": "hs_lastmodifieddate", "direction": "ASCENDING"}],
+                    filter_groups=[{"filters": [{"propertyName": spec.modified_property, "operator": "GTE", "value": str(lower)}]}],
+                    sorts=[{"propertyName": spec.modified_property, "direction": "ASCENDING"}],
                     properties=spec.all_properties,
                     limit=PAGE_SIZE,
                     after=after,
@@ -620,7 +620,7 @@ class HubSpotConnector(BaseConnector):
                 yield results
                 seen += len(results)
                 for obj in results:
-                    newest = max(newest, to_ms((obj.get("properties") or {}).get("hs_lastmodifieddate")) or newest)
+                    newest = max(newest, to_ms((obj.get("properties") or {}).get(spec.modified_property)) or newest)
                 after = _next_after(data)
                 if not after:
                     return
